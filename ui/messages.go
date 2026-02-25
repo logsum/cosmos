@@ -1,0 +1,72 @@
+package ui
+
+// ChatTokenMsg carries a single token delta from LLM streaming
+type ChatTokenMsg struct {
+	Text string
+}
+
+// ChatCompletionMsg signals the assistant message is complete
+type ChatCompletionMsg struct{}
+
+// ChatErrorMsg reports an error during LLM interaction
+type ChatErrorMsg struct {
+	Error string
+}
+
+// ChatToolUseMsg signals the LLM is invoking a tool.
+type ChatToolUseMsg struct {
+	ToolCallID string
+	ToolName   string
+	Input      string // JSON string of input args
+}
+
+// ChatToolResultMsg carries the result of a tool execution.
+type ChatToolResultMsg struct {
+	ToolCallID string
+	ToolName   string
+	Result     string
+	IsError    bool
+}
+
+// ToolExecutionMsg carries full tool execution data for the Agents page.
+type ToolExecutionMsg struct {
+	ToolCallID string
+	ToolName   string
+	Input      string // Full JSON input
+	Output     string // Full result text
+	IsError    bool
+}
+
+// ChatContextWarningMsg warns about context usage reaching 50%.
+type ChatContextWarningMsg struct {
+	Percentage float64
+	Threshold  float64
+	ModelID    string
+}
+
+// ChatContextAutoCompactMsg signals automatic compaction at 90%.
+type ChatContextAutoCompactMsg struct {
+	Percentage float64
+	ModelID    string
+}
+
+// ChatCompactionStartMsg signals that compaction has begun.
+type ChatCompactionStartMsg struct {
+	Mode string // "manual" or "automatic"
+}
+
+// ChatCompactionProgressMsg provides mid-flight update during compaction.
+type ChatCompactionProgressMsg struct {
+	Stage string
+}
+
+// ChatCompactionCompleteMsg signals successful compaction with metrics.
+type ChatCompactionCompleteMsg struct {
+	OldTokens int
+	NewTokens int
+}
+
+// ChatCompactionFailedMsg signals compaction failure.
+type ChatCompactionFailedMsg struct {
+	Error string
+}
