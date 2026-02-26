@@ -113,13 +113,14 @@ The permission layer that governs what tools can do.
 - [x] Unit tests (`engine/manifest/manifest_test.go`)
 
 ### 2.2 Policy Evaluator (`engine/policy/evaluator.go`)
-- [ ] `Evaluate(manifest, permissionKey) -> Decision` (allow/deny/request_once/request_always)
-- [ ] Default-deny for undeclared permissions
-- [ ] Glob matching for permission keys (`fs:read:./src/**` matches `fs:read:./src/main.go`)
-- [ ] `~` expansion in permission paths
-- [ ] Load per-project overrides from `.cosmos/policy.json`
-- [ ] Persist `request_once` decisions to `.cosmos/policy.json`
-- [ ] Unit tests (`engine/policy/policy_test.go`)
+- [x] `Evaluate(agentName, permissionKey, rules) -> Decision` (allow/deny/prompt_once/prompt_always)
+- [x] Default-deny for undeclared permissions
+- [x] Glob matching for permission keys (`fs:read:./src/**` matches `fs:read:./src/main.go`) via `doublestar`
+- [x] `~` expansion in permission paths
+- [x] Specificity-based rule matching (exact > glob > broad, narrower glob wins, most restrictive tie-break)
+- [x] Load per-project overrides from `.cosmos/policy.json` (team overrides take absolute precedence)
+- [x] Persist `request_once` decisions to `.cosmos/policy.json` (atomic write, `0600` permissions)
+- [x] Unit tests (`engine/policy/policy_test.go`) — 41 tests including concurrency with `-race`
 
 ### 2.3 Audit Logging (`engine/policy/audit.go`)
 - [ ] JSON-lines writer to `.cosmos/audit.jsonl`

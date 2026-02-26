@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.49.0
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.40.12
 	github.com/aws/smithy-go v1.24.1
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/charmbracelet/bubbles v0.20.0
 	github.com/charmbracelet/bubbletea v1.3.5
 	github.com/charmbracelet/glamour v0.8.0
