@@ -86,6 +86,17 @@ Split into sub-tasks to enable incremental progress without blocking on Phase 3 
 - [x] Status bar: display actual model name from config (formatted via `ui.formatModelName`)
 - [x] Currency: read `config.Currency`, if not USD call `CurrencyEngine.FetchRate()` once at startup, build `CurrencyFormatter`, pass to `NewTracker`
 
+### 1.7 Chat Rendering - Markdown Support (`ui/chat.go`)
+- [x] Add glamour dependency for markdown rendering with chroma syntax highlighting
+- [x] Enhance `chatMessage` struct with rendering cache fields (`renderedLines`, `isMarkdown`, `renderError`)
+- [x] Implement `getGlamourRenderer(width)` with "dark" style and dynamic word wrap
+- [x] Implement `renderMessageMarkdown(text)` to render markdown to ANSI-formatted lines
+- [x] Implement `trimEmptyLines()` helper for cleaning rendered output
+- [x] Modify `ChatCompletionMsg` handler to render markdown on message finalization
+- [x] Update `View()` to use cached `renderedLines` when available, fallback to `wrapText()`
+- [x] Update `buildAllRenderedLines()` identically to preserve critical scrollback invariant
+- [x] Graceful fallback to plain text on any rendering errors
+
 ---
 
 ## Phase 2: Manifest & Policy
@@ -93,13 +104,13 @@ Split into sub-tasks to enable incremental progress without blocking on Phase 3 
 The permission layer that governs what tools can do.
 
 ### 2.1 Manifest Parsing (`engine/manifest/schema.go`)
-- [ ] Parse `cosmo.manifest.json` into `Manifest` struct
-- [ ] Validate required fields: name, version, entry, functions, permissions
-- [ ] Parse permission keys with glob support (`fs:read:./src/**`)
-- [ ] Parse function definitions (name, params with types, returns)
-- [ ] Timeout parsing (string like `"30s"` to `time.Duration`)
-- [ ] HMAC signature verification for permission block integrity
-- [ ] Unit tests (`engine/manifest/manifest_test.go`)
+- [x] Parse `cosmo.manifest.json` into `Manifest` struct
+- [x] Validate required fields: name, version, entry, functions, permissions
+- [x] Parse permission keys with glob support (`fs:read:./src/**`)
+- [x] Parse function definitions (name, params with types, returns)
+- [x] Timeout parsing (string like `"30s"` to `time.Duration`)
+- [x] Ed25519 signature verification for permission block integrity
+- [x] Unit tests (`engine/manifest/manifest_test.go`)
 
 ### 2.2 Policy Evaluator (`engine/policy/evaluator.go`)
 - [ ] `Evaluate(manifest, permissionKey) -> Decision` (allow/deny/request_once/request_always)
@@ -214,15 +225,14 @@ File safety net — every write is reversible.
 - [ ] LLM generates `index.js` + `cosmo.manifest.json`
 - [ ] Save to `~/.cosmos/agents/<name>/`
 - [ ] User enable/disable toggle for generated agents
-- [ ] Manifest HMAC signing for newly created agents
+- [ ] Manifest Ed25519 signing for newly created agents (private key: `~/.cosmos/agents.private.key`)
+- [ ] Generate user Ed25519 keypair at install/setup if missing
 
 ---
 
 ## Phase 7: Polish & Hardening
 
 ### 7.1 Chat Rendering Enhancements
-- [ ] Markdown rendering in assistant messages (`glamour`)
-- [ ] Syntax highlighting in code blocks (`chroma`)
 - [ ] Inline diffs when agents modify files (`+`/`-` lines with highlighting)
 - [ ] Copy to clipboard for code blocks and messages
 - [ ] Hotkey menu on messages: retry, edit, copy, delete
@@ -236,7 +246,8 @@ File safety net — every write is reversible.
 - [ ] Write manifests with appropriate permissions for each
 
 ### 7.3 Security Hardening
-- [ ] Manifest HMAC verification on every load (detect tampering)
+- [ ] Manifest Ed25519 verification on every load (detect tampering)
+- [ ] Embed trusted Ed25519 public keys in code (include Giacomo default key; allow additional user keys)
 - [ ] Re-approval flow when manifest permissions change between versions
 - [ ] Verify no host process execution paths exist outside Docker
 - [ ] Fuzz manifest parser with malformed inputs

@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -22,6 +23,20 @@ const (
 	ansiReset  = "\033[0m"        // Reset color
 	ansiBold   = "\033[1m"        // Bold text
 )
+
+func getGlamourRenderer(width int) (*glamour.TermRenderer, error) {
+	// Create a new renderer with the specified width
+	// This ensures correct wrapping even after terminal resize
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width),
+		glamour.WithPreservedNewLines(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating glamour renderer: %w", err)
+	}
+	return renderer, nil
+}
 
 type toolState int
 
@@ -45,6 +60,10 @@ type chatMessage struct {
 	isTool    bool
 	isWarning bool // for system warnings (context, etc.)
 	tool      *toolInfo
+
+	// Markdown rendering cache
+	renderedLines []string // Cached ANSI-rendered output (nil until finalized)
+	renderError   error    // non-nil if glamour rendering failed
 }
 
 type ChatModel struct {
@@ -70,6 +89,71 @@ func NewChatModel(session SessionSubmitter) *ChatModel {
 		session: session,
 		spinner: sp,
 	}
+}
+
+// renderMessageMarkdown renders markdown text to ANSI-formatted lines.
+func (m *ChatModel) renderMessageMarkdown(text string) ([]string, error) {
+	availableWidth := m.width - 2 // Account for "▌ " bar prefix
+	if availableWidth < 20 {
+		availableWidth = 20
+	}
+
+	renderer, err := getGlamourRenderer(availableWidth)
+	if err != nil {
+		return nil, fmt.Errorf("initializing glamour: %w", err)
+	}
+
+	rendered, err := renderer.Render(text)
+	if err != nil {
+		return nil, fmt.Errorf("rendering markdown: %w", err)
+	}
+
+	// Split into lines (one per terminal line)
+	lines := strings.Split(strings.TrimRight(rendered, "\n"), "\n")
+
+	// Remove empty leading/trailing lines
+	lines = trimEmptyLines(lines)
+
+	return lines, nil
+}
+
+// finalizeAccumulatedText renders the current accumulatedText as a markdown
+// assistant message, appends it to m.messages, and resets the accumulator.
+// This is a no-op if accumulatedText is empty.
+func (m *ChatModel) finalizeAccumulatedText() {
+	if m.accumulatedText == "" {
+		return
+	}
+	msg := chatMessage{
+		text:   m.accumulatedText,
+		isUser: false,
+	}
+	renderedLines, err := m.renderMessageMarkdown(m.accumulatedText)
+	if err == nil {
+		msg.renderedLines = renderedLines
+	} else {
+		msg.renderError = err
+	}
+	m.messages = append(m.messages, msg)
+	m.accumulatedText = ""
+	m.assistantHeaderPrinted = false
+}
+
+func trimEmptyLines(lines []string) []string {
+	start := 0
+	for start < len(lines) && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+
+	end := len(lines)
+	for end > start && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+
+	if start >= end {
+		return []string{""}
+	}
+	return lines[start:end]
 }
 
 func (m *ChatModel) Init() tea.Cmd {
@@ -176,18 +260,8 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ChatCompletionMsg:
 		// Finalize the assistant message — but only if there's text to finalize.
 		// After a tool-use turn, accumulatedText is already "" (reset by
-		// ChatToolResultMsg), so appending would create a ghost empty message
-		// that adds spurious lines to both View() and terminal scrollback.
-		if m.accumulatedText != "" {
-			m.messages = append(m.messages, chatMessage{
-				text:   m.accumulatedText,
-				isUser: false,
-			})
-		}
-
-		// Reset accumulator
-		m.accumulatedText = ""
-		m.assistantHeaderPrinted = false
+		// ChatToolResultMsg), so finalizeAccumulatedText is a no-op.
+		m.finalizeAccumulatedText()
 
 		// Check if this new message pushed older messages off-screen that need flushing
 		flushCmd := m.flushOldMessages()
@@ -199,14 +273,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ChatToolUseMsg:
 		// Finalize any in-progress assistant text before showing tool use
-		if m.accumulatedText != "" {
-			m.messages = append(m.messages, chatMessage{
-				text:   m.accumulatedText,
-				isUser: false,
-			})
-			m.accumulatedText = ""
-			m.assistantHeaderPrinted = false
-		}
+		m.finalizeAccumulatedText()
 
 		params := formatToolParams(msg.Input, 3)
 		toolMsg := chatMessage{
@@ -283,15 +350,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ChatContextWarningMsg:
-		// Finalize any streaming text first
-		if m.accumulatedText != "" {
-			m.messages = append(m.messages, chatMessage{
-				text:   m.accumulatedText,
-				isUser: false,
-			})
-			m.accumulatedText = ""
-			m.assistantHeaderPrinted = false
-		}
+		m.finalizeAccumulatedText()
 
 		// Add warning message
 		warning := fmt.Sprintf(
@@ -310,15 +369,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ChatContextAutoCompactMsg:
-		// Finalize any streaming text first
-		if m.accumulatedText != "" {
-			m.messages = append(m.messages, chatMessage{
-				text:   m.accumulatedText,
-				isUser: false,
-			})
-			m.accumulatedText = ""
-			m.assistantHeaderPrinted = false
-		}
+		m.finalizeAccumulatedText()
 
 		// Add auto-compact notification
 		notice := fmt.Sprintf(
@@ -337,15 +388,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ChatCompactionStartMsg:
-		// Finalize any streaming text first
-		if m.accumulatedText != "" {
-			m.messages = append(m.messages, chatMessage{
-				text:   m.accumulatedText,
-				isUser: false,
-			})
-			m.accumulatedText = ""
-			m.assistantHeaderPrinted = false
-		}
+		m.finalizeAccumulatedText()
 
 		// Show compaction start message
 		mode := "Compacting"
@@ -391,15 +434,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ChatCompactionCompleteMsg:
-		// Finalize any streaming text first
-		if m.accumulatedText != "" {
-			m.messages = append(m.messages, chatMessage{
-				text:   m.accumulatedText,
-				isUser: false,
-			})
-			m.accumulatedText = ""
-			m.assistantHeaderPrinted = false
-		}
+		m.finalizeAccumulatedText()
 
 		// Calculate reduction percentage
 		reduction := 100.0 * float64(msg.OldTokens-msg.NewTokens) / float64(msg.OldTokens)
@@ -421,15 +456,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ChatCompactionFailedMsg:
-		// Finalize any streaming text first
-		if m.accumulatedText != "" {
-			m.messages = append(m.messages, chatMessage{
-				text:   m.accumulatedText,
-				isUser: false,
-			})
-			m.accumulatedText = ""
-			m.assistantHeaderPrinted = false
-		}
+		m.finalizeAccumulatedText()
 
 		// Show error message
 		errorMsg := fmt.Sprintf("✗ Compaction failed: %s. Conversation preserved.", msg.Error)
@@ -526,7 +553,15 @@ func (m *ChatModel) View() string {
 			continue
 		}
 
-		wrappedLines := wrapText(msg.text, availableWidth)
+		var wrappedLines []string
+		if msg.renderedLines != nil && len(msg.renderedLines) > 0 {
+			// Use cached glamour rendering
+			wrappedLines = msg.renderedLines
+		} else {
+			// Fallback to plain text wrapping
+			wrappedLines = wrapText(msg.text, availableWidth)
+		}
+
 		if msg.isUser {
 			for i, line := range wrappedLines {
 				if i == 0 {
@@ -826,7 +861,15 @@ func (m *ChatModel) buildAllRenderedLines(availableWidth int) []string {
 			bar = ansiOrange + "▌" + ansiReset
 		}
 
-		wrappedLines := wrapText(msg.text, availableWidth)
+		var wrappedLines []string
+		if msg.renderedLines != nil && len(msg.renderedLines) > 0 {
+			// Use cached glamour rendering
+			wrappedLines = msg.renderedLines
+		} else {
+			// Fallback to plain text wrapping
+			wrappedLines = wrapText(msg.text, availableWidth)
+		}
+
 		for i, line := range wrappedLines {
 			if i == 0 {
 				lines = append(lines, bar+" "+line)

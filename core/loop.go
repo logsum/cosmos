@@ -367,9 +367,13 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 
 		// Final text response — append and break out of tool loop
 		s.mu.Lock()
+		content := fullText.String()
+		if content == "" {
+			content = "(No response)"
+		}
 		s.history = append(s.history, provider.Message{
 			Role:    provider.RoleAssistant,
-			Content: fullText.String(),
+			Content: content,
 		})
 		s.mu.Unlock()
 
@@ -504,14 +508,7 @@ func (s *Session) performCompaction(ctx context.Context, mode string) error {
 	s.warned50 = false // Reset warning flag for fresh warnings
 	s.mu.Unlock()
 
-	// 8. Adjust token tracker (use modelInfo.ID which is the key tracker.Record() uses;
-	//    s.model may include a regional prefix that doesn't match the tracker key)
-	modelInfo, err := s.getModelInfo(ctx)
-	if err == nil && modelInfo != nil {
-		s.tracker.AdjustTokens(modelInfo.ID, newTokenCount, 0)
-	}
-
-	// 9. Notify UI of success
+	// 8. Notify UI of success
 	s.notifier.Send(CompactionCompleteEvent{
 		OldTokens: oldTokens,
 		NewTokens: newTokenCount,

@@ -208,36 +208,3 @@ func (s CostSnapshot) ContextUsagePercentage(modelID string) float64 {
 	}
 	return 0.0
 }
-
-// AdjustTokens sets absolute token counts for a model, used during compaction.
-// This replaces accumulated counts with new values reflecting the compacted state.
-// All existing source accumulations are replaced with a single "compacted" source.
-// Fires the onUpdate callback (if set) so the status bar reflects the new state.
-func (t *Tracker) AdjustTokens(modelID string, newInput, newOutput int) {
-	t.mu.Lock()
-
-	ma, ok := t.models[modelID]
-	if !ok {
-		// Model not tracked yet, nothing to adjust
-		t.mu.Unlock()
-		return
-	}
-
-	// Replace all source accumulations with a single "compacted" source
-	ma.sources = map[Source]*sourceAccum{
-		Source("compacted"): {
-			inputTokens:  newInput,
-			outputTokens: newOutput,
-		},
-	}
-
-	var snap CostSnapshot
-	if t.onUpdate != nil {
-		snap = t.snapshotLocked()
-	}
-	t.mu.Unlock()
-
-	if t.onUpdate != nil {
-		t.onUpdate(snap)
-	}
-}

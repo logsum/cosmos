@@ -511,7 +511,7 @@ When `request_once` or `request_always` triggers, the prompt appears **inline in
 
 ### Integrity
 
-Manifests include an HMAC signature for permission declarations. The project embeds a public verification key; the private key is stored outside the project (e.g., in `~/Documents/`). When manifest permissions change between versions, the user must re-approve.
+Manifests include an Ed25519 signature for permission declarations. Signing uses a private key stored outside the repo at `~/.cosmos/agents.private.key` (Giacomo local path: `/home/giacomo/.cosmos/agents.private.key`). Verification uses embedded Ed25519 public key(s) in code (including Giacomo's default key). Other users generate their own keypair during installation and add their public key to the trusted verifier set. When manifest permissions change between versions, the user must re-approve.
 
 ---
 
@@ -643,7 +643,7 @@ The VFS (virtual filesystem) layer wraps all file operations exposed to V8. Befo
 1. **No host execution**: Tools never spawn processes on the host. Build goes through Docker.
 2. **Default deny**: Any permission not declared in the manifest is denied and logged.
 3. **Isolated V8**: One isolate per tool. No shared state between tools.
-4. **Manifest signing**: HMAC verification prevents tampering with permission declarations.
+4. **Manifest signing**: Ed25519 signature verification prevents tampering with permission declarations.
 5. **Audit everything**: Every permission check is logged with redaction for sensitive arguments.
 6. **VFS snapshots**: Every file write is reversible via the changelog.
 7. **User in the loop**: `request_once` and `request_always` put the user in control with visible context about what the tool wants to do.
