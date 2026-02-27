@@ -123,11 +123,18 @@ The permission layer that governs what tools can do.
 - [x] Unit tests (`engine/policy/policy_test.go`) — 41 tests including concurrency with `-race`
 
 ### 2.3 Audit Logging (`engine/policy/audit.go`)
-- [ ] JSON-lines writer to `.cosmos/audit.jsonl`
-- [ ] Fields: timestamp, agent, tool, permission, decision, arguments
-- [ ] Redact sensitive data in arguments (paths containing tokens, keys, passwords)
-- [ ] Log rotation: rotate at 30 days or 10 MB
-- [ ] Reader for Agents History page to consume
+- [x] JSON-lines writer to `.cosmos/audit-{session-id}.jsonl` (per-session logs)
+- [x] Fields: timestamp, agent, tool, permission, decision, arguments
+- [x] Redact sensitive data in arguments (paths containing tokens, keys, passwords)
+- [x] Session-based cleanup: delete all session data (audit logs, snapshots, session state) after 30 days via `engine/maintenance` package
+- [x] Reader for Agents History page to consume
+
+**Implementation Notes:**
+- Audit logs are per-session: `.cosmos/audit-{sessionID}.jsonl`
+- No per-file rotation; cleanup happens at application bootstrap
+- The `engine/maintenance/cleanup.go` package scans and deletes session data older than 30 days
+- Cleanup is synchronous at startup, non-blocking, and logs warnings on error
+- See `app/bootstrap.go` phase 1.5 for integration
 
 ### 2.4 Permission Request UI
 - [ ] Define `PermissionRequestMsg` Bubble Tea message

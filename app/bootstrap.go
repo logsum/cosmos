@@ -5,6 +5,8 @@ import (
 	"cosmos/config"
 	"cosmos/core"
 	"cosmos/core/provider"
+	"cosmos/engine/maintenance"
+	"cosmos/engine/policy"
 	"cosmos/engine/tools"
 	"cosmos/providers/bedrock"
 	"cosmos/ui"
@@ -12,8 +14,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
 )
 
 // Bootstrap creates and wires all application dependencies.
@@ -26,6 +30,26 @@ func Bootstrap(ctx context.Context) (*Application, error) {
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "cosmos: warning: %s\n", w)
+	}
+
+	// 1.5. Clean up old session data
+	cleanupOpts := maintenance.CleanupOptions{
+		CosmosDir:   ".cosmos",
+		SessionsDir: cfg.SessionsDir,
+		MaxAge:      30 * 24 * time.Hour,
+		DryRun:      false,
+	}
+	cleanupResult, err := maintenance.CleanupSessionData(cleanupOpts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cosmos: warning: session cleanup failed: %v\n", err)
+	} else if len(cleanupResult.Errors) > 0 {
+		for _, e := range cleanupResult.Errors {
+			fmt.Fprintf(os.Stderr, "cosmos: warning: cleanup: %s\n", e)
+		}
+	} else if cleanupResult.DeletedAuditFiles > 0 || cleanupResult.DeletedSnapshotDirs > 0 || cleanupResult.DeletedSessionFiles > 0 {
+		// Only log if something was actually deleted (reduce noise)
+		totalDeleted := cleanupResult.DeletedAuditFiles + cleanupResult.DeletedSnapshotDirs + cleanupResult.DeletedSessionFiles
+		fmt.Fprintf(os.Stderr, "cosmos: cleaned up old session data: %d files\n", totalDeleted)
 	}
 
 	// 2. Initialize currency formatter
@@ -140,7 +164,19 @@ func setupSession(
 	toolDefs := tools.StubToolDefinitions()
 	adapter := &coreNotifierAdapter{ui: notifier}
 
+	// Create audit logger with session ID
+	sessionID := uuid.New().String()
+	cosmosDir := ".cosmos" // Project-local directory
+	auditLogger, err := policy.NewAuditLogger(sessionID, cosmosDir)
+	if err != nil {
+		// Log warning but continue (audit is non-critical for core functionality)
+		fmt.Fprintf(os.Stderr, "cosmos: warning: audit logger init failed: %v\n", err)
+		auditLogger = nil
+	}
+
+	// Pass the same sessionID to both audit logger and session
 	session := core.NewSession(
+		sessionID,
 		llmProvider,
 		tracker,
 		adapter,
@@ -149,6 +185,7 @@ func setupSession(
 		4096, // MaxTokens
 		executor,
 		toolDefs,
+		auditLogger,
 	)
 
 	return session, toolDefs

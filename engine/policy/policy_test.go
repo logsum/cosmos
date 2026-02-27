@@ -496,7 +496,9 @@ func TestLoadPolicyValidFile(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(pf)
-	os.WriteFile(policyPath, data, 0o600)
+	if err := os.WriteFile(policyPath, data, 0o600); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
 
 	e := newEvaluatorForTest(policyPath, dir)
 	entry, ok := e.overrides["myagent"]["net:http"]
@@ -511,7 +513,9 @@ func TestLoadPolicyValidFile(t *testing.T) {
 func TestLoadPolicyMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")
-	os.WriteFile(policyPath, []byte("{malformed"), 0o600)
+	if err := os.WriteFile(policyPath, []byte("{malformed"), 0o600); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
 
 	e := &Evaluator{policyPath: policyPath, overrides: make(map[string]map[string]PolicyEntry)}
 	err := e.LoadPolicy()
@@ -525,7 +529,9 @@ func TestLoadPolicyUnsupportedVersion(t *testing.T) {
 	policyPath := filepath.Join(dir, "policy.json")
 	pf := PolicyFile{Version: 99, Overrides: map[string]map[string]PolicyEntry{}}
 	data, _ := json.Marshal(pf)
-	os.WriteFile(policyPath, data, 0o600)
+	if err := os.WriteFile(policyPath, data, 0o600); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
 
 	e := &Evaluator{policyPath: policyPath, overrides: make(map[string]map[string]PolicyEntry)}
 	err := e.LoadPolicy()
@@ -546,7 +552,9 @@ func TestLoadPolicyInvalidEffect(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(pf)
-	os.WriteFile(policyPath, data, 0o600)
+	if err := os.WriteFile(policyPath, data, 0o600); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
 
 	e := &Evaluator{policyPath: policyPath, overrides: make(map[string]map[string]PolicyEntry)}
 	err := e.LoadPolicy()
@@ -567,7 +575,9 @@ func TestLoadPolicyInvalidReason(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(pf)
-	os.WriteFile(policyPath, data, 0o600)
+	if err := os.WriteFile(policyPath, data, 0o600); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
 
 	e := &Evaluator{policyPath: policyPath, overrides: make(map[string]map[string]PolicyEntry)}
 	err := e.LoadPolicy()
@@ -721,8 +731,12 @@ func TestReloadPolicyAfterExternalChange(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(pf)
-	os.MkdirAll(filepath.Dir(e.policyPath), 0o700)
-	os.WriteFile(e.policyPath, data, 0o600)
+	if err := os.MkdirAll(filepath.Dir(e.policyPath), 0o700); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	if err := os.WriteFile(e.policyPath, data, 0o600); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
 
 	if err := e.LoadPolicy(); err != nil {
 		t.Fatalf("LoadPolicy: %v", err)
@@ -782,7 +796,9 @@ func TestNewEvaluatorWithExistingPolicy(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(pf)
-	os.WriteFile(policyPath, data, 0o600)
+	if err := os.WriteFile(policyPath, data, 0o600); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
 
 	e, err := NewEvaluator(policyPath)
 	if err != nil {
@@ -801,7 +817,9 @@ func TestNewEvaluatorWithExistingPolicy(t *testing.T) {
 func TestNewEvaluatorWithBadPolicy(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")
-	os.WriteFile(policyPath, []byte("garbage"), 0o600)
+	if err := os.WriteFile(policyPath, []byte("garbage"), 0o600); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
 
 	_, err := NewEvaluator(policyPath)
 	if err == nil {

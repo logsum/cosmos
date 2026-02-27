@@ -56,7 +56,8 @@ func DefaultConfig() Config {
 		PricingCacheTTL: 168, // 1 week in hours
 		PricingEnabled:  true,
 		Currency:        "USD",
-		AuditFile:       filepath.Join(".cosmos", "audit.jsonl"),
+		// AuditFile documents the pattern - actual files are per-session: audit-<session-id>.jsonl
+		AuditFile:       filepath.Join(".cosmos", "audit-{session-id}.jsonl"),
 		PolicyFile:      filepath.Join(".cosmos", "policy.json"),
 		MaxToolTimeout:  5 * time.Minute,
 	}

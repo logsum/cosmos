@@ -554,7 +554,7 @@ func (m *ChatModel) View() string {
 		}
 
 		var wrappedLines []string
-		if msg.renderedLines != nil && len(msg.renderedLines) > 0 {
+		if len(msg.renderedLines) > 0 {
 			// Use cached glamour rendering
 			wrappedLines = msg.renderedLines
 		} else {
@@ -862,7 +862,7 @@ func (m *ChatModel) buildAllRenderedLines(availableWidth int) []string {
 		}
 
 		var wrappedLines []string
-		if msg.renderedLines != nil && len(msg.renderedLines) > 0 {
+		if len(msg.renderedLines) > 0 {
 			// Use cached glamour rendering
 			wrappedLines = msg.renderedLines
 		} else {

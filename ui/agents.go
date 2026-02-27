@@ -49,7 +49,6 @@ type AgentsModel struct {
 	executions     []AgentExecution
 	availableTools []Tool
 	toolStats      map[string]*toolActivity
-	newAgentPrompt string
 	message        string
 	width          int
 	height         int

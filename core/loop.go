@@ -3,9 +3,11 @@ package core
 import (
 	"context"
 	"cosmos/core/provider"
+	"cosmos/engine/policy"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 )
@@ -64,11 +66,15 @@ type Session struct {
 	systemMsg string
 	maxTokens int
 
+	id          string              // UUID v4, generated at creation
+	auditLogger *policy.AuditLogger // nil if audit disabled
+
 	mu          sync.Mutex
 	history     []provider.Message
 	userMsgChan chan string
 	stopChan    chan struct{}
 	stopOnce    sync.Once
+	wg          sync.WaitGroup // Tracks in-flight operations (loop, message processing)
 
 	cachedModelInfo *provider.ModelInfo
 	modelInfoOnce   sync.Once
@@ -84,6 +90,7 @@ type Notifier interface {
 
 // NewSession creates a new conversation session
 func NewSession(
+	sessionID string,
 	prov provider.Provider,
 	tracker *Tracker,
 	notifier Notifier,
@@ -92,6 +99,7 @@ func NewSession(
 	maxTokens int,
 	executor ToolExecutor,
 	tools []provider.ToolDefinition,
+	auditLogger *policy.AuditLogger,
 ) *Session {
 	return &Session{
 		provider:    prov,
@@ -102,6 +110,8 @@ func NewSession(
 		maxTokens:   maxTokens,
 		executor:    executor,
 		tools:       tools,
+		id:          sessionID,
+		auditLogger: auditLogger,
 		history:     []provider.Message{},
 		userMsgChan: make(chan string, 16), // Buffered for responsiveness
 		stopChan:    make(chan struct{}),
@@ -119,16 +129,31 @@ func (s *Session) SubmitMessage(text string) {
 
 // Start begins the background conversation loop
 func (s *Session) Start(ctx context.Context) {
+	s.wg.Add(1)
 	go s.loop(ctx)
 }
 
 // Stop gracefully terminates the session. It is safe to call multiple times.
 func (s *Session) Stop() {
-	s.stopOnce.Do(func() { close(s.stopChan) })
+	s.stopOnce.Do(func() {
+		close(s.stopChan)
+		s.wg.Wait() // Wait for loop and in-flight message processing to complete
+		if s.auditLogger != nil {
+			if err := s.auditLogger.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "cosmos: audit log close failed: %v\n", err)
+			}
+		}
+	})
+}
+
+// ID returns the session's unique identifier.
+func (s *Session) ID() string {
+	return s.id
 }
 
 // loop is the main goroutine that processes user messages
 func (s *Session) loop(ctx context.Context) {
+	defer s.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
@@ -136,10 +161,12 @@ func (s *Session) loop(ctx context.Context) {
 		case <-s.stopChan:
 			return
 		case userText := <-s.userMsgChan:
+			s.wg.Add(1)
 			if err := s.processUserMessage(ctx, userText); err != nil {
 				// Send error to UI
 				s.notifier.Send(ErrorEvent{Error: err.Error()})
 			}
+			s.wg.Done()
 		}
 	}
 }
@@ -350,6 +377,22 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 					Output:     tr.Content,
 					IsError:    tr.IsError,
 				})
+
+				// Log to audit trail
+				if s.auditLogger != nil {
+					if err := s.auditLogger.Log(policy.AuditEntry{
+						Agent:      "stub",  // Will be agent name once loader is implemented
+						Tool:       tc.Name,
+						Permission: "stub",  // Will be actual permission once policy integration is complete
+						Decision:   decisionFromError(tr.IsError),
+						Source:     "manifest",
+						Arguments:  tc.Input,
+						ToolCallID: tc.ID,
+						Error:      errorString(tr),
+					}); err != nil {
+						fmt.Fprintf(os.Stderr, "cosmos: audit log failed: %v\n", err)
+					}
+				}
 			}
 
 			// Append tool results as a user message (Bedrock convention)
@@ -608,6 +651,22 @@ func (s *Session) buildCompactedHistory(summary string) []provider.Message {
 	newHistory = append(newHistory, recentMessages...)
 
 	return newHistory
+}
+
+// decisionFromError converts tool execution error status to audit decision.
+func decisionFromError(isError bool) string {
+	if isError {
+		return "denied"
+	}
+	return "allowed"
+}
+
+// errorString extracts error message from tool result.
+func errorString(tr provider.ToolResult) string {
+	if tr.IsError {
+		return tr.Content
+	}
+	return ""
 }
 
 // estimateTokenCount estimates token count using character heuristic.

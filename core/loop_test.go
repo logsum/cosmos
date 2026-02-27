@@ -3,11 +3,13 @@ package core
 import (
 	"context"
 	"cosmos/core/provider"
+	"cosmos/engine/policy"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // --- Mock provider ---
@@ -112,7 +114,7 @@ func toolUseChunks(toolID, toolName, inputJSON string) []provider.StreamChunk {
 }
 
 func newTestSession(prov provider.Provider, executor ToolExecutor, notifier Notifier) *Session {
-	return NewSession(prov, NewTracker(nil, nil), notifier, "test-model", "system", 1024, executor, nil)
+	return NewSession("test-session-id", prov, NewTracker(nil, nil), notifier, "test-model", "system", 1024, executor, nil, nil)
 }
 
 // --- Tests ---
@@ -559,7 +561,7 @@ func TestGetModelInfoCaching(t *testing.T) {
 		callCount: &listCallCount,
 	}
 	notifier := &mockNotifier{}
-	session := NewSession(prov, NewTracker(nil, nil), notifier, "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "system", 1024, &mockExecutor{}, nil)
+	session := NewSession("test-session-id", prov, NewTracker(nil, nil), notifier, "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "system", 1024, &mockExecutor{}, nil, nil)
 
 	// First call — should hit ListModels
 	info1, err := session.getModelInfo(context.Background())
@@ -633,7 +635,7 @@ func TestContextWarning50Percent(t *testing.T) {
 
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession(prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
 
 	// First message: should trigger warning at 50%
 	err := session.processUserMessage(context.Background(), "First")
@@ -699,7 +701,7 @@ func TestContextAutoCompactAt90Percent(t *testing.T) {
 
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession(prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
 
 	err := session.processUserMessage(context.Background(), "Large prompt")
 	if err != nil {
@@ -777,7 +779,7 @@ func TestContextUpdateEveryResponse(t *testing.T) {
 
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession(prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
 
 	// Send four messages
 	for i := 1; i <= 4; i++ {
@@ -855,7 +857,7 @@ func TestManualCompaction(t *testing.T) {
 	prov := &mockProvider{calls: chunks, models: []provider.ModelInfo{model}}
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession(prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
 
 	// Build up conversation with longer user messages (8 exchanges)
 	longUserMsg := strings.Repeat("Can you explain the implementation details? ", 12)
@@ -931,7 +933,7 @@ func TestCompactionWithShortHistory(t *testing.T) {
 		prov := &mockProvider{calls: [][]provider.StreamChunk{}, models: []provider.ModelInfo{model}}
 		notifier := &mockNotifier{}
 		tracker := NewTracker(nil, nil)
-		session := NewSession(prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil)
+		session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
 
 		err := session.processUserMessage(context.Background(), "/compact")
 		if err == nil {
@@ -962,7 +964,7 @@ func TestCompactionWithShortHistory(t *testing.T) {
 		prov := &mockProvider{calls: chunks, models: []provider.ModelInfo{model}}
 		notifier := &mockNotifier{}
 		tracker := NewTracker(nil, nil)
-		session := NewSession(prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil)
+		session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
 
 		// Build 4 messages (2 user + 2 assistant)
 		for i := 1; i <= 2; i++ {
@@ -1021,7 +1023,7 @@ func TestCompactionPreservesRecentMessages(t *testing.T) {
 	prov := &mockProvider{calls: chunks, models: []provider.ModelInfo{model}}
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession(prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
 
 	// Build conversation
 	for i := 1; i <= 8; i++ {
@@ -1099,7 +1101,7 @@ func TestCompactionResetsWarned50(t *testing.T) {
 	prov := &mockProvider{calls: chunks, models: []provider.ModelInfo{model}}
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession(prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
 
 	// Use longer user messages for meaningful compaction
 	longUserMsg := strings.Repeat("Can you explain the implementation details? ", 8)
@@ -1176,8 +1178,8 @@ func TestAutoCompactionDeferredDuringToolUse(t *testing.T) {
 	}
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession(prov, tracker, notifier, "test-model", "system", 1024,
-		&mockExecutor{results: map[string]string{"get_weather": `{"temp":"22°C"}`}}, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024,
+		&mockExecutor{results: map[string]string{"get_weather": `{"temp":"22°C"}`}}, nil, nil)
 
 	err := session.processUserMessage(context.Background(), "What's the weather?")
 	if err != nil {
@@ -1232,5 +1234,197 @@ func TestAutoCompactionDeferredDuringToolUse(t *testing.T) {
 	}
 	if firstCompactIdx != -1 && lastToolExecIdx != -1 && firstCompactIdx < lastToolExecIdx {
 		t.Errorf("compaction event at index %d appeared before last tool execution at index %d", firstCompactIdx, lastToolExecIdx)
+	}
+}
+
+// TestSession_AuditLogging verifies that tool executions are logged to the audit trail.
+func TestSession_AuditLogging(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create mock provider with tool use response
+	chunks := []provider.StreamChunk{
+		{Event: provider.EventToolStart, ToolCallID: "call_1", ToolName: "get_weather"},
+		{Event: provider.EventToolDelta, InputDelta: `{"city":"SF"}`},
+		{Event: provider.EventToolEnd},
+		{Event: provider.EventMessageStop, StopReason: "tool_use"},
+	}
+	chunks2 := textChunks("The weather is nice.")
+
+	prov := &mockProvider{calls: [][]provider.StreamChunk{chunks, chunks2}}
+	executor := &mockExecutor{results: map[string]string{"get_weather": `{"temp":"22°C"}`}}
+	notifier := &mockNotifier{}
+	tracker := NewTracker(nil, nil)
+
+	// Create audit logger
+	sessionID := "test-session-audit-123"
+	auditLogger, err := policy.NewAuditLogger(sessionID, tmpDir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger failed: %v", err)
+	}
+	defer auditLogger.Close()
+
+	session := NewSession(sessionID, prov, tracker, notifier, "test-model", "system", 1024, executor, nil, auditLogger)
+
+	// Process message with tool execution
+	err = session.processUserMessage(context.Background(), "What's the weather?")
+	if err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	// Close audit logger to flush
+	session.Stop()
+
+	// Read audit log and verify entry exists
+	entries, err := policy.ReadAuditLog(sessionID, tmpDir)
+	if err != nil {
+		t.Fatalf("ReadAuditLog failed: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.Tool != "get_weather" {
+		t.Errorf("tool mismatch: got %s, want get_weather", entry.Tool)
+	}
+	if entry.ToolCallID != "call_1" {
+		t.Errorf("tool_call_id mismatch: got %s, want call_1", entry.ToolCallID)
+	}
+	if entry.Decision != "allowed" {
+		t.Errorf("decision mismatch: got %s, want allowed", entry.Decision)
+	}
+	if entry.SessionID != sessionID {
+		t.Errorf("session_id mismatch: got %s, want %s", entry.SessionID, sessionID)
+	}
+	if entry.Timestamp == "" {
+		t.Error("timestamp is empty")
+	}
+
+	// Verify arguments were logged
+	if entry.Arguments == nil {
+		t.Error("arguments is nil")
+	} else if city, ok := entry.Arguments["city"]; !ok || city != "SF" {
+		t.Errorf("arguments[city] mismatch: got %v, want SF", city)
+	}
+}
+
+// TestSession_AuditLoggingError verifies that tool execution errors are logged.
+func TestSession_AuditLoggingError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create mock provider with tool use response
+	chunks := []provider.StreamChunk{
+		{Event: provider.EventToolStart, ToolCallID: "call_err", ToolName: "failing_tool"},
+		{Event: provider.EventToolDelta, InputDelta: `{"input":"data"}`},
+		{Event: provider.EventToolEnd},
+		{Event: provider.EventMessageStop, StopReason: "tool_use"},
+	}
+	chunks2 := textChunks("Tool failed, let me try something else.")
+
+	prov := &mockProvider{calls: [][]provider.StreamChunk{chunks, chunks2}}
+	executor := &mockExecutor{errors: map[string]error{"failing_tool": fmt.Errorf("permission denied")}}
+	notifier := &mockNotifier{}
+	tracker := NewTracker(nil, nil)
+
+	// Create audit logger
+	sessionID := "test-session-audit-error"
+	auditLogger, err := policy.NewAuditLogger(sessionID, tmpDir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger failed: %v", err)
+	}
+	defer auditLogger.Close()
+
+	session := NewSession(sessionID, prov, tracker, notifier, "test-model", "system", 1024, executor, nil, auditLogger)
+
+	// Process message with failing tool
+	err = session.processUserMessage(context.Background(), "Run the failing tool")
+	if err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	session.Stop()
+
+	// Read audit log and verify error entry
+	entries, err := policy.ReadAuditLog(sessionID, tmpDir)
+	if err != nil {
+		t.Fatalf("ReadAuditLog failed: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+
+	entry := entries[0]
+	if entry.Decision != "denied" {
+		t.Errorf("decision mismatch for error: got %s, want denied", entry.Decision)
+	}
+	if entry.Error == "" {
+		t.Error("error field should contain error message")
+	}
+	if !strings.Contains(entry.Error, "permission denied") {
+		t.Errorf("error message mismatch: got %s, want to contain 'permission denied'", entry.Error)
+	}
+}
+
+// TestSession_ShutdownCoordination verifies clean shutdown with in-flight operations.
+func TestSession_ShutdownCoordination(t *testing.T) {
+	// Create slow executor that simulates long-running tool
+	slowExecutor := &slowExecutor{delay: 100 * time.Millisecond}
+
+	chunks := []provider.StreamChunk{
+		{Event: provider.EventToolStart, ToolCallID: "call_slow", ToolName: "slow_tool"},
+		{Event: provider.EventToolDelta, InputDelta: `{}`},
+		{Event: provider.EventToolEnd},
+		{Event: provider.EventMessageStop, StopReason: "tool_use"},
+	}
+	chunks2 := textChunks("Done.")
+
+	prov := &mockProvider{calls: [][]provider.StreamChunk{chunks, chunks2}}
+	notifier := &mockNotifier{}
+	tracker := NewTracker(nil, nil)
+
+	session := NewSession("test-shutdown", prov, tracker, notifier, "test-model", "system", 1024, slowExecutor, nil, nil)
+
+	ctx := context.Background()
+	session.Start(ctx)
+
+	// Submit message that will trigger slow tool execution
+	session.SubmitMessage("Run slow tool")
+
+	// Give it a moment to start processing
+	time.Sleep(20 * time.Millisecond)
+
+	// Stop session while tool is executing
+	// This should NOT panic (previous bug: would close audit logger before processUserMessage finishes)
+	session.Stop()
+
+	// Verify executor was called (WaitGroup properly tracked the operation)
+	if slowExecutor.calls == 0 {
+		t.Error("executor was not called - WaitGroup may have blocked submission")
+	}
+
+	// Verify session stopped cleanly (no panic = success)
+	// The test passes if we reach this point without crashing
+}
+
+// slowExecutor simulates a long-running tool execution
+type slowExecutor struct {
+	delay time.Duration
+	mu    sync.Mutex
+	calls int
+}
+
+func (e *slowExecutor) Execute(ctx context.Context, name string, _ map[string]any) (string, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+
+	// Simulate slow operation
+	select {
+	case <-time.After(e.delay):
+		return "slow operation completed", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -635,7 +636,9 @@ func fetchRowsForServiceCode(ctx context.Context, pricingClient *awspricing.Clie
 
 				if !hasNewerPrices {
 					// Update the last checked timestamp
-					updateCacheTimestamp(cacheFile)
+					if err := updateCacheTimestamp(cacheFile); err != nil {
+						log.Printf("warning: cache timestamp update failed: %v", err)
+					}
 					return cache.Rows, nil
 				}
 				// Fall through to fetch new data
@@ -698,7 +701,9 @@ func fetchRowsForServiceCode(ctx context.Context, pricingClient *awspricing.Clie
 	// Write to cache if enabled
 	if cacheDir != "" {
 		cacheFile := getCacheFilePath(cacheDir, serviceCode, locationFilter)
-		writeCache(cacheFile, serviceCode, locationFilter, rows)
+		if err := writeCache(cacheFile, serviceCode, locationFilter, rows); err != nil {
+			log.Printf("warning: cache write failed: %v", err)
+		}
 	}
 
 	return rows, nil
