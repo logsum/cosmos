@@ -53,6 +53,16 @@ type toolInfo struct {
 	params []string // formatted key: value lines, max 3
 }
 
+type permissionRequestInfo struct {
+	toolCallID  string
+	toolName    string
+	agentName   string
+	description string
+	respondFunc func(allowed, remember bool) // Adapter-provided callback
+	resolved    bool
+	decision    string // "granted", "denied", or "timed out"
+}
+
 type chatMessage struct {
 	text      string
 	isUser    bool
@@ -60,6 +70,10 @@ type chatMessage struct {
 	isTool    bool
 	isWarning bool // for system warnings (context, etc.)
 	tool      *toolInfo
+
+	// Permission request handling
+	isPermissionRequest bool
+	permissionRequest   *permissionRequestInfo
 
 	// Markdown rendering cache
 	renderedLines []string // Cached ANSI-rendered output (nil until finalized)
@@ -199,6 +213,31 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ============================================================================
 
 	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		// Check if we have an active permission request
+		activeRequest := m.getActivePermissionRequest()
+		if activeRequest != nil {
+			switch msg.String() {
+			case "y", "Y":
+				return m, func() tea.Msg {
+					return PermissionDecisionMsg{
+						ToolCallID: activeRequest.toolCallID,
+						Allowed:    true,
+						Remember:   false,
+					}
+				}
+			case "n", "N":
+				return m, func() tea.Msg {
+					return PermissionDecisionMsg{
+						ToolCallID: activeRequest.toolCallID,
+						Allowed:    false,
+						Remember:   false,
+					}
+				}
+			}
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -470,8 +509,89 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, flushCmd
 		}
 		return m, nil
+
+	case ChatPermissionRequestMsg:
+		// Finalize any in-progress text before showing permission request
+		m.finalizeAccumulatedText()
+
+		// Add permission request message to display.
+		// Core owns the timeout — no UI-side timer needed.
+		m.messages = append(m.messages, chatMessage{
+			isPermissionRequest: true,
+			permissionRequest: &permissionRequestInfo{
+				toolCallID:  msg.ToolCallID,
+				toolName:    msg.ToolName,
+				agentName:   msg.AgentName,
+				description: msg.Description,
+				respondFunc: msg.RespondFunc,
+				resolved:    false,
+			},
+		})
+		return m, nil
+
+	case PermissionDecisionMsg:
+		// Find the matching unresolved permission request
+		for i := range m.messages {
+			if m.messages[i].isPermissionRequest &&
+				m.messages[i].permissionRequest != nil &&
+				m.messages[i].permissionRequest.toolCallID == msg.ToolCallID &&
+				!m.messages[i].permissionRequest.resolved {
+
+				// Send response via adapter callback (no core import needed)
+				if respond := m.messages[i].permissionRequest.respondFunc; respond != nil {
+					respond(msg.Allowed, msg.Remember)
+				}
+
+				// Mark request as resolved
+				m.messages[i].permissionRequest.resolved = true
+				if msg.Allowed {
+					m.messages[i].permissionRequest.decision = "granted"
+				} else {
+					m.messages[i].permissionRequest.decision = "denied"
+				}
+				break
+			}
+		}
+
+		flushCmd := m.flushOldMessages()
+		if flushCmd != nil {
+			return m, flushCmd
+		}
+		return m, nil
+
+	case ChatPermissionTimeoutMsg:
+		// Core timed out — mark the permission request as resolved
+		for i := range m.messages {
+			if m.messages[i].isPermissionRequest &&
+				m.messages[i].permissionRequest != nil &&
+				m.messages[i].permissionRequest.toolCallID == msg.ToolCallID &&
+				!m.messages[i].permissionRequest.resolved {
+
+				m.messages[i].permissionRequest.resolved = true
+				m.messages[i].permissionRequest.decision = "timed out"
+				break
+			}
+		}
+
+		flushCmd := m.flushOldMessages()
+		if flushCmd != nil {
+			return m, flushCmd
+		}
+		return m, nil
 	}
 	return m, nil
+}
+
+// getActivePermissionRequest returns the most recent unresolved permission request, or nil.
+func (m *ChatModel) getActivePermissionRequest() *permissionRequestInfo {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].isPermissionRequest &&
+			m.messages[i].permissionRequest != nil &&
+			!m.messages[i].permissionRequest.resolved {
+			return m.messages[i].permissionRequest
+		}
+	}
+	return nil
 }
 
 func (m *ChatModel) View() string {
@@ -519,6 +639,35 @@ func (m *ChatModel) View() string {
 
 	// Render completed messages
 	for _, msg := range m.messages {
+		if msg.isPermissionRequest && msg.permissionRequest != nil {
+			req := msg.permissionRequest
+
+			if !req.resolved {
+				// Active permission prompt — write each line separately to match
+				// buildAllRenderedLines() exactly (critical scrollback invariant).
+				warningBar := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("⚠")
+				dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+				content.WriteString(warningBar + " " + req.description + "\n")
+				content.WriteString("  " + dimStyle.Render("[y] Allow  [n] Deny") + "\n")
+			} else {
+				// Resolved request - show decision
+				var icon string
+				var color string
+				if req.decision == "granted" {
+					icon = "✓"
+					color = "46" // green
+				} else {
+					icon = "✗"
+					color = "196" // red
+				}
+				statusBar := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(icon)
+				content.WriteString(statusBar + " Permission " + req.decision + " for " + req.toolName + "\n")
+			}
+			content.WriteString("\n") // blank separator
+			continue
+		}
+
 		if msg.isWarning {
 			// Warning messages use yellow bar (226), no blank line after
 			warningBar := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("▌")
@@ -819,6 +968,30 @@ func (m *ChatModel) buildAllRenderedLines(availableWidth int) []string {
 
 	// Render completed messages
 	for _, msg := range m.messages {
+		if msg.isPermissionRequest && msg.permissionRequest != nil {
+			req := msg.permissionRequest
+
+			if !req.resolved {
+				// Active permission prompt - show yellow warning with y/n options
+				lines = append(lines, ansiYellow+"⚠"+ansiReset+" "+req.description)
+				lines = append(lines, "  "+ansiDim+"[y] Allow  [n] Deny"+ansiReset)
+			} else {
+				// Resolved request - show decision
+				var icon string
+				var color string
+				if req.decision == "granted" {
+					icon = "✓"
+					color = ansiGreen
+				} else {
+					icon = "✗"
+					color = ansiRed
+				}
+				lines = append(lines, color+icon+ansiReset+" Permission "+req.decision+" for "+req.toolName)
+			}
+			lines = append(lines, "") // blank separator
+			continue
+		}
+
 		if msg.isWarning {
 			// Warning bar with ANSI yellow (226)
 			bar := ansiYellow + "▌" + ansiReset

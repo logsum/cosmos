@@ -33,6 +33,9 @@ func (e *StubExecutor) Execute(_ context.Context, name string, input map[string]
 		time.Sleep(5 * time.Second)
 		path, _ := input["path"].(string)
 		return "", fmt.Errorf("permission denied: cannot read %s", path)
+	case "mock_permission_tool":
+		content, _ := input["content"].(string)
+		return fmt.Sprintf("Successfully wrote %d bytes to ./test.txt", len(content)), nil
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -69,6 +72,20 @@ func StubToolDefinitions() []provider.ToolDefinition {
 					},
 				},
 				"required": []string{"path"},
+			},
+		},
+		{
+			Name:        "mock_permission_tool",
+			Description: "Test tool that requires user permission (request_once: fs:write:./test.txt)",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"content": map[string]any{
+						"type":        "string",
+						"description": "Content to write to test file",
+					},
+				},
+				"required": []string{"content"},
 			},
 		},
 	}

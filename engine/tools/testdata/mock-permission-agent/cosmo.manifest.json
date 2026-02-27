@@ -1,0 +1,24 @@
+{
+  "name": "mock-permission-agent",
+  "version": "1.0.0",
+  "description": "Test agent for permission request flow",
+  "entry": "index.js",
+  "functions": [
+    {
+      "name": "mock_permission_tool",
+      "description": "Test tool requiring permission",
+      "params": {
+        "content": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "returns": {
+        "type": "string"
+      }
+    }
+  ],
+  "permissions": {
+    "fs:write:./test.txt": "request_once"
+  }
+}

@@ -533,6 +533,69 @@ Manifests include an Ed25519 signature for permission declarations. Signing uses
 - **Retention**: Rotate every 30 days or 10 MB, whichever comes first
 - **UI**: The Agents page History view reads directly from this file
 
+### Permission Request UI Flow
+
+When a tool requires user permission (`request_once` or `request_always`), the flow is:
+
+1. **Core checks permission** (`core/loop.go:checkPermission()`):
+   - Evaluates manifest rules via `evaluator.Evaluate()`
+   - If result is `EffectPromptOnce` or `EffectPromptAlways`, proceed to step 2
+   - Otherwise (Allow/Deny), return immediately
+
+2. **Core creates response channel**:
+   - `responseChan := make(chan PermissionResponse, 1)` (buffered to prevent goroutine leaks)
+   - Channel type: `chan<- PermissionResponse` with fields `Allowed bool` and `Remember bool`
+
+3. **Core emits event**:
+   - `PermissionRequestEvent` sent via `notifier.Send()` with:
+     - Tool metadata (name, agent, permission key)
+     - Human-readable description
+     - Timeout duration (default: 30s, configurable per manifest)
+     - `ResponseChan` embedded in the event
+
+4. **Adapter translates event** (`app/adapter.go`):
+   - Type-switches on `PermissionRequestEvent`
+   - Wraps `ResponseChan` in a `func(allowed, remember bool)` callback
+   - Forwards as `ChatPermissionRequestMsg` to UI with `RespondFunc` (no `core` import in `ui`)
+
+5. **Chat page renders prompt** (`ui/chat.go`):
+   - Inline yellow warning bar with permission description
+   - Prompt: `[y] Allow  [n] Deny`
+   - `App` intercepts y/n keys when `permissionPending` is true, forwarding them to scaffold
+   - `ChatModel` emits `PermissionDecisionMsg` which triggers the callback
+
+6. **UI responds via callback**:
+   - Calls `respondFunc(allowed, remember)` which writes to core's channel
+   - Marks prompt as resolved in UI
+
+7. **Core unblocks**:
+   - `select` statement receives response from channel
+   - If `Allowed==true`: execute tool normally
+   - If `Allowed==false`: return error as tool result
+   - For `request_once`: persist decision via `evaluator.RecordOnceDecision()` (writes to `.cosmos/policy.json`)
+   - If persistence fails, emit `ErrorEvent` to notify user
+
+8. **Timeout** (core-owned):
+   - Core's `select` includes `time.After(timeout)` — single timeout owner
+   - On timeout, core emits `PermissionTimeoutEvent` and applies `DefaultAllow`
+   - Adapter translates to `ChatPermissionTimeoutMsg` so UI marks prompt as resolved
+
+**Key Design Choices:**
+
+- **Channel-based blocking**: Core synchronously waits on channel; no polling or callbacks
+- **Buffered channel (size 1)**: Prevents goroutine leak if UI is torn down before responding
+- **Single timeout owner**: Core owns the timeout exclusively; UI does not run its own timer
+- **Context cancellation**: `ctx.Done()` case allows clean shutdown during permission prompts
+- **Callback isolation**: Adapter wraps `chan<- core.PermissionResponse` in a callback, so `ui` never imports `core`
+- **App-level key routing**: `App.permissionPending` routes y/n to scaffold during permission prompts, bypassing the text input
+
+**Threading Model:**
+
+- Core loop is single-threaded (sequential message processing)
+- `checkPermission()` called synchronously from `processUserMessage()`
+- `evaluator.Evaluate()` and `RecordOnceDecision()` are internally thread-safe (`sync.Mutex`)
+- No concurrent permission checks (tools execute sequentially)
+
 ---
 
 ## LLM Provider Architecture

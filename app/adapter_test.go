@@ -28,6 +28,8 @@ func TestAllCoreEventsHandled(t *testing.T) {
 	var _ interface{} = core.CompactionProgressEvent{}
 	var _ interface{} = core.CompactionCompleteEvent{}
 	var _ interface{} = core.CompactionFailedEvent{}
+	var _ interface{} = core.PermissionRequestEvent{}
+	var _ interface{} = core.PermissionTimeoutEvent{}
 
 	// If a new event type is added to core/events.go, add it here.
 	// The adapter's Send() method must also handle it.

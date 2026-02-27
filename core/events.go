@@ -1,5 +1,7 @@
 package core
 
+import "time"
+
 // Core-level events emitted by the LLM loop. These are framework-agnostic
 // counterparts to the UI message types in ui/messages.go. The adapter in
 // main.go translates them into Bubble Tea messages for the TUI.
@@ -75,4 +77,30 @@ type CompactionCompleteEvent struct {
 // CompactionFailedEvent signals compaction failure with preserved conversation.
 type CompactionFailedEvent struct {
 	Error string
+}
+
+// PermissionRequestEvent is emitted when a tool requires user permission.
+// The core blocks on ResponseChan waiting for the user's decision.
+type PermissionRequestEvent struct {
+	ToolCallID   string
+	ToolName     string
+	AgentName    string
+	Permission   string        // e.g. "fs:write:./src/**"
+	Description  string        // User-friendly description
+	Timeout      time.Duration // 0 = no timeout
+	DefaultAllow bool          // If timeout expires, grant or deny?
+	ResponseChan chan<- PermissionResponse
+}
+
+// PermissionResponse is the user's decision sent back via channel.
+type PermissionResponse struct {
+	Allowed  bool
+	Remember bool // Only meaningful for request_once
+}
+
+// PermissionTimeoutEvent is emitted when a permission request times out.
+// The UI should mark the request as resolved with the default decision.
+type PermissionTimeoutEvent struct {
+	ToolCallID string
+	Allowed    bool // Whether the default was to allow (from DefaultAllow)
 }

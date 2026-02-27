@@ -6,6 +6,7 @@ import (
 	"cosmos/engine/policy"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -95,6 +96,32 @@ func (n *mockNotifier) getMessages() []any {
 	return out
 }
 
+// waitForEvent polls the notifier for an event matching predicate, with timeout.
+// Returns (event, true) on match or (nil, false) on timeout.
+func (n *mockNotifier) waitForEvent(predicate func(any) bool, timeout time.Duration) (any, bool) {
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		n.mu.Lock()
+		for _, m := range n.msgs {
+			if predicate(m) {
+				n.mu.Unlock()
+				return m, true
+			}
+		}
+		n.mu.Unlock()
+
+		select {
+		case <-deadline:
+			return nil, false
+		case <-ticker.C:
+			continue
+		}
+	}
+}
+
 // --- Helpers ---
 
 func textChunks(text string) []provider.StreamChunk {
@@ -114,7 +141,7 @@ func toolUseChunks(toolID, toolName, inputJSON string) []provider.StreamChunk {
 }
 
 func newTestSession(prov provider.Provider, executor ToolExecutor, notifier Notifier) *Session {
-	return NewSession("test-session-id", prov, NewTracker(nil, nil), notifier, "test-model", "system", 1024, executor, nil, nil)
+	return NewSession("test-session-id", prov, NewTracker(nil, nil), notifier, "test-model", "system", 1024, executor, nil, nil, nil)
 }
 
 // --- Tests ---
@@ -561,7 +588,7 @@ func TestGetModelInfoCaching(t *testing.T) {
 		callCount: &listCallCount,
 	}
 	notifier := &mockNotifier{}
-	session := NewSession("test-session-id", prov, NewTracker(nil, nil), notifier, "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "system", 1024, &mockExecutor{}, nil, nil)
+	session := NewSession("test-session-id", prov, NewTracker(nil, nil), notifier, "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 	// First call — should hit ListModels
 	info1, err := session.getModelInfo(context.Background())
@@ -635,7 +662,7 @@ func TestContextWarning50Percent(t *testing.T) {
 
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 	// First message: should trigger warning at 50%
 	err := session.processUserMessage(context.Background(), "First")
@@ -701,7 +728,7 @@ func TestContextAutoCompactAt90Percent(t *testing.T) {
 
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 	err := session.processUserMessage(context.Background(), "Large prompt")
 	if err != nil {
@@ -779,7 +806,7 @@ func TestContextUpdateEveryResponse(t *testing.T) {
 
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 	// Send four messages
 	for i := 1; i <= 4; i++ {
@@ -857,7 +884,7 @@ func TestManualCompaction(t *testing.T) {
 	prov := &mockProvider{calls: chunks, models: []provider.ModelInfo{model}}
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 	// Build up conversation with longer user messages (8 exchanges)
 	longUserMsg := strings.Repeat("Can you explain the implementation details? ", 12)
@@ -933,7 +960,7 @@ func TestCompactionWithShortHistory(t *testing.T) {
 		prov := &mockProvider{calls: [][]provider.StreamChunk{}, models: []provider.ModelInfo{model}}
 		notifier := &mockNotifier{}
 		tracker := NewTracker(nil, nil)
-		session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
+		session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 		err := session.processUserMessage(context.Background(), "/compact")
 		if err == nil {
@@ -964,7 +991,7 @@ func TestCompactionWithShortHistory(t *testing.T) {
 		prov := &mockProvider{calls: chunks, models: []provider.ModelInfo{model}}
 		notifier := &mockNotifier{}
 		tracker := NewTracker(nil, nil)
-		session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
+		session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 		// Build 4 messages (2 user + 2 assistant)
 		for i := 1; i <= 2; i++ {
@@ -1023,7 +1050,7 @@ func TestCompactionPreservesRecentMessages(t *testing.T) {
 	prov := &mockProvider{calls: chunks, models: []provider.ModelInfo{model}}
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 	// Build conversation
 	for i := 1; i <= 8; i++ {
@@ -1101,7 +1128,7 @@ func TestCompactionResetsWarned50(t *testing.T) {
 	prov := &mockProvider{calls: chunks, models: []provider.ModelInfo{model}}
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
-	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil)
+	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024, &mockExecutor{}, nil, nil, nil)
 
 	// Use longer user messages for meaningful compaction
 	longUserMsg := strings.Repeat("Can you explain the implementation details? ", 8)
@@ -1179,7 +1206,7 @@ func TestAutoCompactionDeferredDuringToolUse(t *testing.T) {
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
 	session := NewSession("test-session-id", prov, tracker, notifier, "test-model", "system", 1024,
-		&mockExecutor{results: map[string]string{"get_weather": `{"temp":"22°C"}`}}, nil, nil)
+		&mockExecutor{results: map[string]string{"get_weather": `{"temp":"22°C"}`}}, nil, nil, nil)
 
 	err := session.processUserMessage(context.Background(), "What's the weather?")
 	if err != nil {
@@ -1263,7 +1290,7 @@ func TestSession_AuditLogging(t *testing.T) {
 	}
 	defer auditLogger.Close()
 
-	session := NewSession(sessionID, prov, tracker, notifier, "test-model", "system", 1024, executor, nil, auditLogger)
+	session := NewSession(sessionID, prov, tracker, notifier, "test-model", "system", 1024, executor, nil, auditLogger, nil)
 
 	// Process message with tool execution
 	err = session.processUserMessage(context.Background(), "What's the weather?")
@@ -1335,7 +1362,7 @@ func TestSession_AuditLoggingError(t *testing.T) {
 	}
 	defer auditLogger.Close()
 
-	session := NewSession(sessionID, prov, tracker, notifier, "test-model", "system", 1024, executor, nil, auditLogger)
+	session := NewSession(sessionID, prov, tracker, notifier, "test-model", "system", 1024, executor, nil, auditLogger, nil)
 
 	// Process message with failing tool
 	err = session.processUserMessage(context.Background(), "Run the failing tool")
@@ -1384,7 +1411,7 @@ func TestSession_ShutdownCoordination(t *testing.T) {
 	notifier := &mockNotifier{}
 	tracker := NewTracker(nil, nil)
 
-	session := NewSession("test-shutdown", prov, tracker, notifier, "test-model", "system", 1024, slowExecutor, nil, nil)
+	session := NewSession("test-shutdown", prov, tracker, notifier, "test-model", "system", 1024, slowExecutor, nil, nil, nil)
 
 	ctx := context.Background()
 	session.Start(ctx)
@@ -1426,5 +1453,272 @@ func (e *slowExecutor) Execute(ctx context.Context, name string, _ map[string]an
 		return "slow operation completed", nil
 	case <-ctx.Done():
 		return "", ctx.Err()
+	}
+}
+
+// --- Test helpers for permissions ---
+
+func createTestEvaluator(t *testing.T) (*policy.Evaluator, string) {
+	t.Helper()
+	// Create temporary policy file
+	tmpDir := t.TempDir()
+	policyPath := fmt.Sprintf("%s/policy.json", tmpDir)
+
+	// Create empty policy file (evaluator will use manifest rules)
+	if err := os.WriteFile(policyPath, []byte(`{"version":1,"overrides":{}}`), 0644); err != nil {
+		t.Fatalf("failed to create test policy file: %v", err)
+	}
+
+	evaluator, err := policy.NewEvaluator(policyPath)
+	if err != nil {
+		t.Fatalf("failed to create evaluator: %v", err)
+	}
+
+	return evaluator, policyPath
+}
+
+// --- Permission flow tests ---
+
+func TestPermissionRequestFlow_Allow(t *testing.T) {
+	prov := &mockProvider{calls: [][]provider.StreamChunk{
+		toolUseChunks("tool_1", "mock_permission_tool", `{"content":"test"}`),
+		textChunks("Tool executed successfully!"),
+	}}
+	notifier := &mockNotifier{}
+	executor := &mockExecutor{
+		results: map[string]string{
+			"mock_permission_tool": "Successfully wrote 4 bytes to ./test.txt",
+		},
+	}
+	evaluator, _ := createTestEvaluator(t)
+
+	session := NewSession(
+		"test-session-id", prov, NewTracker(nil, nil), notifier,
+		"test-model", "system", 1024, executor, nil, nil, evaluator,
+	)
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- session.processUserMessage(context.Background(), "Use mock_permission_tool to write 'test'")
+	}()
+
+	// Wait for PermissionRequestEvent (no sleep — poll with timeout)
+	evt, ok := notifier.waitForEvent(func(m any) bool {
+		_, is := m.(PermissionRequestEvent)
+		return is
+	}, 5*time.Second)
+	if !ok {
+		t.Fatal("timed out waiting for PermissionRequestEvent")
+	}
+	permRequest := evt.(PermissionRequestEvent)
+
+	if permRequest.ToolName != "mock_permission_tool" {
+		t.Errorf("ToolName = %q, want %q", permRequest.ToolName, "mock_permission_tool")
+	}
+	if permRequest.Permission != "fs:write:./test.txt" {
+		t.Errorf("Permission = %q, want %q", permRequest.Permission, "fs:write:./test.txt")
+	}
+
+	// Simulate user approval
+	permRequest.ResponseChan <- PermissionResponse{Allowed: true, Remember: false}
+
+	if err := <-errChan; err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	// Verify tool was executed (history should have tool result)
+	if len(session.history) < 3 {
+		t.Fatalf("history length = %d, want at least 3", len(session.history))
+	}
+	foundToolResult := false
+	for _, msg := range session.history {
+		if msg.Role == provider.RoleUser {
+			for _, tr := range msg.ToolResults {
+				if tr.ToolUseID == "tool_1" {
+					foundToolResult = true
+					if tr.IsError {
+						t.Errorf("tool result has IsError=true, want false")
+					}
+				}
+			}
+		}
+	}
+	if !foundToolResult {
+		t.Error("expected tool result in history after permission granted")
+	}
+}
+
+func TestPermissionRequestFlow_Deny(t *testing.T) {
+	prov := &mockProvider{calls: [][]provider.StreamChunk{
+		toolUseChunks("tool_1", "mock_permission_tool", `{"content":"test"}`),
+		textChunks("Permission was denied."),
+	}}
+	notifier := &mockNotifier{}
+	executor := &mockExecutor{
+		results: map[string]string{
+			"mock_permission_tool": "Should not be executed",
+		},
+	}
+	evaluator, _ := createTestEvaluator(t)
+
+	session := NewSession(
+		"test-session-id", prov, NewTracker(nil, nil), notifier,
+		"test-model", "system", 1024, executor, nil, nil, evaluator,
+	)
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- session.processUserMessage(context.Background(), "Use mock_permission_tool to write 'test'")
+	}()
+
+	evt, ok := notifier.waitForEvent(func(m any) bool {
+		_, is := m.(PermissionRequestEvent)
+		return is
+	}, 5*time.Second)
+	if !ok {
+		t.Fatal("timed out waiting for PermissionRequestEvent")
+	}
+	permRequest := evt.(PermissionRequestEvent)
+
+	// Simulate user denial
+	permRequest.ResponseChan <- PermissionResponse{Allowed: false, Remember: false}
+
+	if err := <-errChan; err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	// Verify tool was NOT executed (result should be a permission denied error)
+	foundErrorResult := false
+	for _, msg := range session.history {
+		if msg.Role == provider.RoleUser {
+			for _, tr := range msg.ToolResults {
+				if tr.ToolUseID == "tool_1" && tr.IsError && strings.Contains(tr.Content, "Permission denied") {
+					foundErrorResult = true
+				}
+			}
+		}
+	}
+	if !foundErrorResult {
+		t.Error("expected tool result with permission denial error")
+	}
+}
+
+func TestPermissionRequestFlow_Timeout(t *testing.T) {
+	prov := &mockProvider{calls: [][]provider.StreamChunk{
+		toolUseChunks("tool_1", "mock_permission_tool", `{"content":"test"}`),
+		textChunks("Permission timed out."),
+	}}
+	notifier := &mockNotifier{}
+	executor := &mockExecutor{
+		results: map[string]string{
+			"mock_permission_tool": "Should not be executed",
+		},
+	}
+	evaluator, _ := createTestEvaluator(t)
+
+	session := NewSession(
+		"test-session-id", prov, NewTracker(nil, nil), notifier,
+		"test-model", "system", 1024, executor, nil, nil, evaluator,
+	)
+	session.permissionTimeout = 50 * time.Millisecond // Very short timeout for test
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- session.processUserMessage(context.Background(), "Use mock_permission_tool to write 'test'")
+	}()
+
+	// Wait for PermissionRequestEvent but do NOT respond — let it time out
+	_, ok := notifier.waitForEvent(func(m any) bool {
+		_, is := m.(PermissionRequestEvent)
+		return is
+	}, 5*time.Second)
+	if !ok {
+		t.Fatal("timed out waiting for PermissionRequestEvent")
+	}
+
+	// Wait for processUserMessage to complete (it should time out and proceed)
+	if err := <-errChan; err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	// Verify PermissionTimeoutEvent was emitted
+	_, gotTimeout := notifier.waitForEvent(func(m any) bool {
+		_, is := m.(PermissionTimeoutEvent)
+		return is
+	}, 5*time.Second)
+	if !gotTimeout {
+		t.Error("expected PermissionTimeoutEvent after timeout")
+	}
+
+	// Verify tool result is a permission denied error
+	foundErrorResult := false
+	for _, msg := range session.history {
+		if msg.Role == provider.RoleUser {
+			for _, tr := range msg.ToolResults {
+				if tr.ToolUseID == "tool_1" && tr.IsError && strings.Contains(tr.Content, "timed out") {
+					foundErrorResult = true
+				}
+			}
+		}
+	}
+	if !foundErrorResult {
+		t.Error("expected tool result with timeout error")
+	}
+}
+
+func TestPermissionRequestFlow_ContextCancelled(t *testing.T) {
+	prov := &mockProvider{calls: [][]provider.StreamChunk{
+		toolUseChunks("tool_1", "mock_permission_tool", `{"content":"test"}`),
+		textChunks("Context cancelled."),
+	}}
+	notifier := &mockNotifier{}
+	executor := &mockExecutor{
+		results: map[string]string{
+			"mock_permission_tool": "Should not be executed",
+		},
+	}
+	evaluator, _ := createTestEvaluator(t)
+
+	session := NewSession(
+		"test-session-id", prov, NewTracker(nil, nil), notifier,
+		"test-model", "system", 1024, executor, nil, nil, evaluator,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- session.processUserMessage(ctx, "Use mock_permission_tool to write 'test'")
+	}()
+
+	// Wait for PermissionRequestEvent
+	_, ok := notifier.waitForEvent(func(m any) bool {
+		_, is := m.(PermissionRequestEvent)
+		return is
+	}, 5*time.Second)
+	if !ok {
+		t.Fatal("timed out waiting for PermissionRequestEvent")
+	}
+
+	// Cancel context instead of responding
+	cancel()
+
+	if err := <-errChan; err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	// Verify tool result is a cancellation error
+	foundErrorResult := false
+	for _, msg := range session.history {
+		if msg.Role == provider.RoleUser {
+			for _, tr := range msg.ToolResults {
+				if tr.ToolUseID == "tool_1" && tr.IsError && strings.Contains(tr.Content, "cancelled") {
+					foundErrorResult = true
+				}
+			}
+		}
+	}
+	if !foundErrorResult {
+		t.Error("expected tool result with cancellation error")
 	}
 }

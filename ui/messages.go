@@ -1,5 +1,7 @@
 package ui
 
+import "time"
+
 // ChatTokenMsg carries a single token delta from LLM streaming
 type ChatTokenMsg struct {
 	Text string
@@ -69,4 +71,34 @@ type ChatCompactionCompleteMsg struct {
 // ChatCompactionFailedMsg signals compaction failure.
 type ChatCompactionFailedMsg struct {
 	Error string
+}
+
+// ChatPermissionRequestMsg requests user permission for a tool action.
+// The chat page must display an inline prompt and send the user's decision
+// back via RespondFunc. The adapter wraps the core channel into a callback
+// so that ui never imports core.
+type ChatPermissionRequestMsg struct {
+	ToolCallID   string
+	ToolName     string
+	AgentName    string
+	Permission   string
+	Description  string
+	Timeout      time.Duration
+	DefaultAllow bool
+	RespondFunc  func(allowed, remember bool) // Adapter-provided callback to send decision to core
+}
+
+// ChatPermissionTimeoutMsg signals that a permission request timed out in core.
+// The UI should mark the request as resolved.
+type ChatPermissionTimeoutMsg struct {
+	ToolCallID string
+	Allowed    bool // Whether the default was to allow
+}
+
+// PermissionDecisionMsg is sent by the user when they press y/n on a permission prompt.
+// This is an internal UI message, not sent from core.
+type PermissionDecisionMsg struct {
+	ToolCallID string
+	Allowed    bool
+	Remember   bool
 }

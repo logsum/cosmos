@@ -7,7 +7,15 @@ import (
 	"os"
 )
 
+const version = "0.2.0"
+
 func main() {
+	// Handle --version flag
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
 	ctx := context.Background()
 
 	// Bootstrap application

@@ -21,9 +21,10 @@ type AppConfig struct {
 
 // App is a top-level tea.Model that wraps a Scaffold with a text-input prompt.
 type App struct {
-	Scaffold    *Scaffold
-	promptInput textinput.Model
-	promptGlyph string
+	Scaffold          *Scaffold
+	promptInput       textinput.Model
+	promptGlyph       string
+	permissionPending bool // True when an inline permission prompt is active in chat
 }
 
 // NewApp creates an App from an existing Scaffold and config.
@@ -64,6 +65,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	promptEnabled := a.isPromptEnabled()
 
+	// Track permission state so we can route y/n keys correctly.
+	switch msg.(type) {
+	case ChatPermissionRequestMsg:
+		a.permissionPending = true
+	case PermissionDecisionMsg, ChatPermissionTimeoutMsg:
+		a.permissionPending = false
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.promptInput.Width = msg.Width - 4
@@ -91,6 +100,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.Scaffold = updated.(*Scaffold)
 			return a, cmd
 		}
+
+		// When a permission prompt is active, forward y/n directly to the chat page
+		// (bypassing the text input which would consume them as typed characters).
+		if a.permissionPending {
+			switch msg.String() {
+			case "y", "Y", "n", "N":
+				updated, cmd := a.Scaffold.Update(msg)
+				a.Scaffold = updated.(*Scaffold)
+				return a, cmd
+			}
+		}
 	}
 
 	// Update prompt input only if enabled.
@@ -100,7 +120,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
-	// Update scaffold.
+	// Always forward to scaffold — it handles ctrl+c, tab switching (shift+arrows,
+	// brackets), and routes messages to the active page. The prompt input and scaffold
+	// both receive key messages; this is intentional (same behavior as pre-permission code).
 	updated, scaffoldCmd := a.Scaffold.Update(msg)
 	a.Scaffold = updated.(*Scaffold)
 	cmds = append(cmds, scaffoldCmd)

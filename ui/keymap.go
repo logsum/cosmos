@@ -20,7 +20,7 @@ func newKeyMap() *KeyMap {
 			key.WithKeys("ctrl+left"),
 		),
 		Quit: key.NewBinding(
-			key.WithKeys("ctrl+c"),
+			key.WithKeys("ctrl+c", "ctrl+d"),
 		),
 	}
 }

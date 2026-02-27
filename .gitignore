@@ -34,3 +34,4 @@ go.work.sum
 # binaries
 cosmos
 cosmos_test
+.cosmos

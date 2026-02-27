@@ -73,7 +73,10 @@ func Bootstrap(ctx context.Context) (*Application, error) {
 	tracker := setupTracker(notifier, currencyFormatter)
 
 	// 6. Create core session (executor, tools, adapter)
-	session, tools := setupSession(ctx, cfg, llmProvider, tracker, notifier)
+	session, tools, err := setupSession(ctx, cfg, llmProvider, tracker, notifier)
+	if err != nil {
+		return nil, fmt.Errorf("initializing session: %w", err)
+	}
 
 	// 7. Configure UI pages
 	if err := configureUI(scaffold, session, tools, cfg.DefaultModel); err != nil {
@@ -157,7 +160,7 @@ func setupSession(
 	llmProvider provider.Provider,
 	tracker *core.Tracker,
 	notifier *ui.Notifier,
-) (*core.Session, []provider.ToolDefinition) {
+) (*core.Session, []provider.ToolDefinition, error) {
 	_ = ctx // Reserved for future use (tool loading, V8 initialization)
 
 	executor := tools.NewStubExecutor()
@@ -174,6 +177,17 @@ func setupSession(
 		auditLogger = nil
 	}
 
+	// Create policy evaluator
+	// Note: If policy.json doesn't exist, evaluator still succeeds with empty overrides (stub mode OK)
+	// If policy.json exists but is malformed/unreadable, this is an error - fail explicitly
+	policyPath := filepath.Join(cosmosDir, "policy.json")
+	evaluator, err := policy.NewEvaluator(policyPath)
+	if err != nil {
+		// Policy file exists but is malformed or unreadable - this is a fatal error
+		// (if file doesn't exist, NewEvaluator succeeds with empty overrides)
+		return nil, nil, fmt.Errorf("policy evaluator init failed: %w", err)
+	}
+
 	// Pass the same sessionID to both audit logger and session
 	session := core.NewSession(
 		sessionID,
@@ -186,9 +200,10 @@ func setupSession(
 		executor,
 		toolDefs,
 		auditLogger,
+		evaluator,
 	)
 
-	return session, toolDefs
+	return session, toolDefs, nil
 }
 
 // configureUI sets up scaffold pages and status bar items.

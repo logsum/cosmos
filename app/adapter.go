@@ -58,6 +58,29 @@ func (a *coreNotifierAdapter) Send(msg any) {
 		})
 	case core.CompactionFailedEvent:
 		a.ui.Send(ui.ChatCompactionFailedMsg{Error: e.Error})
+	case core.PermissionRequestEvent:
+		// Wrap the core channel in a callback so ui never imports core
+		ch := e.ResponseChan
+		a.ui.Send(ui.ChatPermissionRequestMsg{
+			ToolCallID:   e.ToolCallID,
+			ToolName:     e.ToolName,
+			AgentName:    e.AgentName,
+			Permission:   e.Permission,
+			Description:  e.Description,
+			Timeout:      e.Timeout,
+			DefaultAllow: e.DefaultAllow,
+			RespondFunc: func(allowed, remember bool) {
+				ch <- core.PermissionResponse{
+					Allowed:  allowed,
+					Remember: remember,
+				}
+			},
+		})
+	case core.PermissionTimeoutEvent:
+		a.ui.Send(ui.ChatPermissionTimeoutMsg{
+			ToolCallID: e.ToolCallID,
+			Allowed:    e.Allowed,
+		})
 	default:
 		// Log unhandled events to detect integration mistakes during refactors.
 		// This should never happen in production if all core events are properly handled.

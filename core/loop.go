@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"cosmos/core/provider"
+	"cosmos/engine/manifest"
 	"cosmos/engine/policy"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -25,6 +27,10 @@ const (
 	// compactionMinHistory is the minimum number of messages needed for compaction to be meaningful.
 	// With fewer messages, preserving recent ones + adding a summary would likely increase token count.
 	compactionMinHistory = compactionPreserveRecent + 2
+
+	// defaultPermissionTimeout is the default timeout for permission requests.
+	// TODO: Make this configurable per manifest when V8 lands.
+	defaultPermissionTimeout = 30 * time.Second
 
 	// compactionPromptTemplate is the prompt sent to the LLM for summarization.
 	compactionPromptTemplate = `You are tasked with summarizing a coding conversation to reduce token usage while preserving all critical information.
@@ -54,7 +60,19 @@ type ToolExecutor interface {
 	Execute(ctx context.Context, name string, input map[string]any) (string, error)
 }
 
-// Session manages a single LLM conversation loop
+// Session manages a single LLM conversation loop.
+//
+// Threading model:
+//   - Session.Start() creates a background goroutine (loop()) that processes user messages.
+//   - User messages are sent via SendMessage() which writes to userMsgChan (buffered).
+//   - The loop goroutine sequentially processes each message, calling processUserMessage().
+//   - Tool execution and permission checks happen synchronously within processUserMessage().
+//   - UI interactions (permission prompts) block on channel communication but don't fork goroutines.
+//
+// Concurrency guarantees:
+//   - evaluator: Read concurrently from multiple permission checks. Evaluator is internally thread-safe (sync.Mutex).
+//   - auditLogger: Written from single-threaded loop goroutine. No concurrent writes.
+//   - history: Protected by mu. Modified in loop goroutine, read in snapshot operations.
 type Session struct {
 	provider provider.Provider
 	tracker  *Tracker
@@ -66,10 +84,12 @@ type Session struct {
 	systemMsg string
 	maxTokens int
 
-	id          string              // UUID v4, generated at creation
-	auditLogger *policy.AuditLogger // nil if audit disabled
+	id                string              // UUID v4, generated at creation
+	auditLogger       *policy.AuditLogger // nil if audit disabled
+	evaluator         *policy.Evaluator   // nil if policy checks disabled; internally thread-safe
+	permissionTimeout time.Duration       // 0 = use defaultPermissionTimeout; configurable for tests
 
-	mu          sync.Mutex
+	mu sync.Mutex
 	history     []provider.Message
 	userMsgChan chan string
 	stopChan    chan struct{}
@@ -100,6 +120,7 @@ func NewSession(
 	executor ToolExecutor,
 	tools []provider.ToolDefinition,
 	auditLogger *policy.AuditLogger,
+	evaluator *policy.Evaluator,
 ) *Session {
 	return &Session{
 		provider:    prov,
@@ -112,6 +133,7 @@ func NewSession(
 		tools:       tools,
 		id:          sessionID,
 		auditLogger: auditLogger,
+		evaluator:   evaluator,
 		history:     []provider.Message{},
 		userMsgChan: make(chan string, 16), // Buffered for responsiveness
 		stopChan:    make(chan struct{}),
@@ -340,9 +362,19 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 					Input:      string(inputJSON),
 				})
 
-				// Execute tool
+				// Check permission before execution
+				permDecision := s.checkPermission(ctx, tc.ID, tc.Name, tc.Input)
+
+				// Execute tool (or deny based on permission)
 				var tr provider.ToolResult
-				if s.executor == nil {
+				if !permDecision.allowed {
+					// Permission denied - return error as tool result
+					tr = provider.ToolResult{
+						ToolUseID: tc.ID,
+						Content:   "Permission denied: " + permDecision.reason,
+						IsError:   true,
+					}
+				} else if s.executor == nil {
 					tr = provider.ToolResult{
 						ToolUseID: tc.ID,
 						Content:   "no tool executor configured",
@@ -667,6 +699,131 @@ func errorString(tr provider.ToolResult) string {
 		return tr.Content
 	}
 	return ""
+}
+
+// permissionDecision captures the result of a permission check.
+type permissionDecision struct {
+	allowed bool
+	reason  string
+}
+
+// checkPermission verifies that a tool is allowed to execute based on manifest permissions.
+// Returns a decision indicating whether execution should proceed.
+//
+// Threading model:
+//   - Called synchronously from processUserMessage() (single-threaded loop goroutine).
+//   - Reads s.evaluator (read-only after Session creation, safe).
+//   - If permission prompt needed (EffectPromptOnce/EffectPromptAlways):
+//     * Emits PermissionRequestEvent with buffered response channel (size 1).
+//     * Blocks on channel waiting for user response (UI writes to channel).
+//     * Timeout (defaultPermissionTimeout) prevents indefinite blocking.
+//   - s.evaluator.Evaluate() is internally thread-safe (sync.Mutex).
+//   - s.evaluator.RecordOnceDecision() writes to policy.json (synchronized internally).
+func (s *Session) checkPermission(ctx context.Context, toolCallID, toolName string, input map[string]any) permissionDecision {
+	// If no evaluator configured, allow all tools (stub mode)
+	if s.evaluator == nil {
+		return permissionDecision{allowed: true}
+	}
+
+	// For now, only mock_permission_tool has explicit permission rules (for testing).
+	// Real implementation will load manifest rules from disk when V8 lands.
+	// Pre-V8 stub tools without manifest rules are allowed by default.
+	if toolName != "mock_permission_tool" {
+		// TODO(Phase 3 - V8): Load manifest for this tool and evaluate permissions
+		return permissionDecision{allowed: true}
+	}
+
+	// Test permission check for mock_permission_tool
+	// Simulates: "fs:write:./test.txt": "request_once"
+	permKey, err := manifest.ParsePermissionKey("fs:write:./test.txt")
+	if err != nil {
+		return permissionDecision{allowed: false, reason: "invalid permission key"}
+	}
+
+	// Hard-coded test rule for mock_permission_tool
+	testRules := []manifest.PermissionRule{
+		{
+			Key:  permKey,
+			Mode: manifest.PermissionRequestOnce,
+		},
+	}
+
+	decision := s.evaluator.Evaluate("test-agent", permKey, testRules)
+
+	// Handle prompt effects
+	if decision.Effect == policy.EffectPromptOnce || decision.Effect == policy.EffectPromptAlways {
+		// Create response channel and emit request event
+		responseChan := make(chan PermissionResponse, 1)
+		defaultAllow := false // Will be per-manifest when V8 lands
+
+		timeout := s.permissionTimeout
+		if timeout == 0 {
+			timeout = defaultPermissionTimeout
+		}
+
+		s.notifier.Send(PermissionRequestEvent{
+			ToolCallID:   toolCallID,
+			ToolName:     toolName,
+			AgentName:    "test-agent",
+			Permission:   "fs:write:./test.txt",
+			Description:  fmt.Sprintf("%s wants to write to ./test.txt", toolName),
+			Timeout:      timeout,
+			DefaultAllow: defaultAllow,
+			ResponseChan: responseChan,
+		})
+
+		// Block waiting for user response (with timeout).
+		// Core owns the timeout — the UI does not run its own timer.
+		select {
+		case response := <-responseChan:
+			if response.Allowed {
+				// Record decision for request_once
+				if decision.Effect == policy.EffectPromptOnce {
+					if err := s.evaluator.RecordOnceDecision("test-agent", permKey.Raw, true); err != nil {
+						s.notifier.Send(ErrorEvent{
+							Error: fmt.Sprintf("Warning: Failed to persist permission grant: %v. You may be prompted again.", err),
+						})
+					}
+				}
+				return permissionDecision{allowed: true}
+			}
+			// User denied
+			if decision.Effect == policy.EffectPromptOnce {
+				if err := s.evaluator.RecordOnceDecision("test-agent", permKey.Raw, false); err != nil {
+					s.notifier.Send(ErrorEvent{
+						Error: fmt.Sprintf("Warning: Failed to persist permission denial: %v. You may be prompted again.", err),
+					})
+				}
+			}
+			return permissionDecision{allowed: false, reason: "user denied permission"}
+
+		case <-time.After(timeout):
+			// Timeout — notify UI so it can mark the prompt as resolved, then apply default
+			s.notifier.Send(PermissionTimeoutEvent{
+				ToolCallID: toolCallID,
+				Allowed:    defaultAllow,
+			})
+			if defaultAllow {
+				return permissionDecision{allowed: true}
+			}
+			return permissionDecision{allowed: false, reason: "permission request timed out"}
+
+		case <-ctx.Done():
+			return permissionDecision{allowed: false, reason: "operation cancelled"}
+		}
+	}
+
+	// EffectAllow or EffectDeny - no prompt needed
+	if decision.Effect == policy.EffectDeny || decision.Effect == policy.EffectAllow {
+		allowed := decision.Effect == policy.EffectAllow
+		if !allowed {
+			return permissionDecision{allowed: false, reason: "permission denied by policy"}
+		}
+		return permissionDecision{allowed: true}
+	}
+
+	// Default: deny (shouldn't reach here)
+	return permissionDecision{allowed: false, reason: "unknown permission effect"}
 }
 
 // estimateTokenCount estimates token count using character heuristic.

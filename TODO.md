@@ -137,11 +137,13 @@ The permission layer that governs what tools can do.
 - See `app/bootstrap.go` phase 1.5 for integration
 
 ### 2.4 Permission Request UI
-- [ ] Define `PermissionRequestMsg` Bubble Tea message
-- [ ] Render inline permission prompt in Chat page: "agent X wants to Y — allow?"
-- [ ] Accept/deny input from user
-- [ ] Timeout + default handling per manifest declaration
-- [ ] Route decision back to policy evaluator
+- [x] Define `PermissionRequestEvent` / `ChatPermissionRequestMsg` / `PermissionDecisionMsg` types
+- [x] Adapter wraps core channel in callback (`RespondFunc`) so `ui` never imports `core`
+- [x] Render inline permission prompt in Chat page: yellow `⚠` bar with `[y] Allow  [n] Deny`
+- [x] Accept/deny input from user (App-level y/n routing when `permissionPending`)
+- [x] Timeout handling: core-owned single timer, emits `PermissionTimeoutEvent`, honors `DefaultAllow`
+- [x] Route decision back to policy evaluator via `RecordOnceDecision()`
+- [ ] Wire to real manifest rules (currently hardcoded for `mock_permission_tool` only)
 
 ---
 
