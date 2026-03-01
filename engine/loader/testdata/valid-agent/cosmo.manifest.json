@@ -1,0 +1,29 @@
+{
+  "name": "valid-agent",
+  "version": "1.0.0",
+  "description": "Test agent with two functions",
+  "entry": "index.js",
+  "functions": [
+    {
+      "name": "greet",
+      "description": "Greet someone by name",
+      "params": {
+        "name": { "type": "string", "required": true, "description": "Person to greet" }
+      },
+      "returns": { "type": "string", "description": "Greeting message" }
+    },
+    {
+      "name": "add",
+      "description": "Add two numbers",
+      "params": {
+        "a": { "type": "number", "required": true, "description": "First number" },
+        "b": { "type": "number", "required": true, "description": "Second number" }
+      },
+      "returns": { "type": "number", "description": "Sum of a and b" }
+    }
+  ],
+  "permissions": {
+    "fs:read": "deny"
+  },
+  "timeout": "10s"
+}

@@ -1,0 +1,54 @@
+{
+  "name": "fs-agent",
+  "version": "1.0.0",
+  "description": "Filesystem tool for testing",
+  "entry": "index.js",
+  "functions": [
+    {
+      "name": "readFile",
+      "description": "Read a file",
+      "params": {
+        "path": { "type": "string", "required": true }
+      },
+      "returns": { "type": "object", "description": "File content" }
+    },
+    {
+      "name": "writeFile",
+      "description": "Write a file",
+      "params": {
+        "path": { "type": "string", "required": true },
+        "content": { "type": "string", "required": true }
+      },
+      "returns": { "type": "object", "description": "Success indicator" }
+    },
+    {
+      "name": "listDir",
+      "description": "List directory contents",
+      "params": {
+        "path": { "type": "string", "required": true }
+      },
+      "returns": { "type": "object", "description": "Directory entries" }
+    },
+    {
+      "name": "statFile",
+      "description": "Stat a file",
+      "params": {
+        "path": { "type": "string", "required": true }
+      },
+      "returns": { "type": "object", "description": "File metadata" }
+    },
+    {
+      "name": "deleteFile",
+      "description": "Delete a file",
+      "params": {
+        "path": { "type": "string", "required": true }
+      },
+      "returns": { "type": "object", "description": "Success indicator" }
+    }
+  ],
+  "permissions": {
+    "fs:read:./testdata/**": "allow",
+    "fs:write:./testdata/**": "allow",
+    "fs:write": "deny"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "timeout-agent",
+  "version": "1.0.0",
+  "description": "Infinite loop tool for timeout testing",
+  "entry": "index.js",
+  "functions": [
+    {
+      "name": "loop",
+      "description": "Runs forever (for timeout testing)",
+      "params": {},
+      "returns": { "type": "null", "description": "Never returns" }
+    }
+  ],
+  "permissions": {
+    "fs:read": "deny"
+  },
+  "timeout": "100ms"
+}

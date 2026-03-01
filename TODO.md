@@ -151,38 +151,42 @@ The permission layer that governs what tools can do.
 
 Sandboxed JavaScript execution for tools.
 
-### 3.1 V8 Runtime (`engine/runtime.go`)
-- [ ] Add `rogchap.com/v8go` dependency
-- [ ] Create one V8 isolate per tool (true isolation)
-- [ ] Load and compile JS source into V8 context
-- [ ] Inject Go-side APIs as global functions in V8 context
-- [ ] Per-tool timeout enforcement (from manifest, max 5 min global cap)
-- [ ] Error capture: JS exceptions → Go error with stack trace
-- [ ] Lazy loading: tools compiled on first invocation, not at startup
-- [ ] Hot reload: detect `.js` file changes, recompile isolate
+### 3.1 V8 Runtime (`engine/runtime/`)
+- [x] Add `rogchap.com/v8go` dependency
+- [x] Create one V8 isolate per tool (true isolation)
+- [x] Load and compile JS source into V8 context
+- [x] Inject Go-side APIs as global functions in V8 context (APIRegistry extensibility point)
+- [x] Per-tool timeout enforcement (from manifest, max 5 min global cap)
+- [x] Error capture: JS exceptions → Go error with stack trace
+- [x] Lazy loading: tools compiled on first invocation, not at startup
+- [x] Hot reload: detect `.js` file changes, recompile isolate (stat-on-use)
+- [x] Function name validation (JS identifier check to prevent script injection)
+- [x] Default `console.log` no-op binding
 
 ### 3.2 Go-side API Injection
 Each API is a Go function registered into the V8 context:
 
-- [ ] `fs.read(path)` — read file, scoped by manifest glob permissions
-- [ ] `fs.write(path, content)` — write file, scoped + VFS snapshot before write
-- [ ] `fs.list(path)` — list directory
-- [ ] `fs.stat(path)` — file metadata
-- [ ] `fs.unlink(path)` — delete file, scoped + VFS snapshot
-- [ ] `http.get(url, headers)` — HTTP GET
-- [ ] `http.post(url, body, headers)` — HTTP POST
-- [ ] `storage.get(key)` / `storage.set(key, value)` — per-tool KV store
-- [ ] `ui.emit(message)` — send progress/status to chat window
+- [x] `fs.read(path)` — read file, scoped by manifest glob permissions
+- [x] `fs.write(path, content)` — write file, scoped + VFS snapshot before write
+- [x] `fs.list(path)` — list directory
+- [x] `fs.stat(path)` — file metadata
+- [x] `fs.unlink(path)` — delete file, scoped + VFS snapshot
+- [x] `http.get(url, headers)` — HTTP GET
+- [x] `http.post(url, body, headers)` — HTTP POST
+- [x] `storage.get(key)` / `storage.set(key, value)` — per-tool KV store
+- [x] `ui.emit(message)` — send progress/status to chat window
 
 Every API call goes through the policy evaluator before executing.
 
-### 3.3 Agent Loader (`engine/loader.go`)
-- [ ] Discover agents from `engine/agents/*/cosmo.manifest.json` (built-in)
-- [ ] Discover agents from `~/.cosmos/agents/*/cosmo.manifest.json` (user)
-- [ ] On name conflict: user version wins
-- [ ] Validate manifest on first load (lazy)
-- [ ] Build tool definition list for LLM (function name, description, params schema)
-- [ ] Expose loaded agents to Agents page (Tools sub-view)
+### 3.3 Agent Loader (`engine/loader/`)
+- [x] Discover agents from `engine/agents/*/cosmo.manifest.json` (built-in)
+- [x] Discover agents from `~/.cosmos/agents/*/cosmo.manifest.json` (user)
+- [x] On name conflict: user version wins
+- [x] Validate manifest on first load (lazy)
+- [x] Build tool definition list for LLM (function name, description, params schema)
+- [x] Expose loaded agents to Agents page (Tools sub-view)
+- [x] Path traversal guard on entry file resolution
+- [x] Agent name sanitization in storage path
 
 ### 3.4 Tool Dispatch Integration
 - [ ] Core loop calls `engine.Execute(agentName, functionName, args)` on tool_use
@@ -262,6 +266,15 @@ File safety net — every write is reversible.
 - [ ] Verify no host process execution paths exist outside Docker
 - [ ] Fuzz manifest parser with malformed inputs
 - [ ] Fuzz policy evaluator with edge-case permission keys
+- [ ] **HTTP: detect and reject silently truncated responses** — `io.LimitReader` caps at 10 MB but caller gets partial data without warning; check `Content-Length` and signal truncation as error (`api_http.go`)
+- [ ] **fs.write: tighten `MkdirAll` behavior** — directory creation is a side effect not independently permission-checked; use `0o700` instead of `0o755`, consider requiring parent to already exist (`api_fs.go`)
+- [ ] **`escapeJSString`: escape NUL bytes and all control characters** — current implementation skips `\x00` and U+0000–U+001F; use `\uNNNN` format for all control chars and validate input is valid UTF-8 (`runtime.go`)
+- [ ] **`ui.emit`: add rate limiting and size bounds** — no permission check, no message size cap, no rate limit; a malicious tool can flood the UI or OOM with a huge string; add max message size (~64 KB), rate limit (~100/s), and strip ANSI escape sequences (`api_ui.go`)
+- [ ] **`fs.read`: add file size limit** — `os.ReadFile` has no cap; a tool can OOM by reading `/dev/zero` or a multi-GB file; check `os.Stat` size before reading, cap at ~50 MB (`api_fs.go`)
+- [ ] **Agent loader: resolve symlinks in discovery paths** — `discoverAgents` and `loadAgent` do not resolve symlinks; a symlink in `~/.cosmos/agents/` can load code from outside the expected tree; apply `filepath.EvalSymlinks` to agent dirs before path traversal checks (`loader.go`)
+
+### 7.3.1 Concurrency & Storage Safety
+- [ ] **Rethink storage for concurrency** — `storage.set` uses a read-modify-write pattern on a JSON file without file locking; currently safe because write tools run sequentially, but this assumption is fragile and undocumented at the storage layer. Options: (a) file-level `flock` during read-modify-write, (b) in-memory cache per agent with mutex + periodic flush, (c) explicit concurrency contract in `ToolExecutor` interface. Should also document and enforce the read-concurrent/write-sequential scheduling invariant at the engine level, not rely on it being implicit.
 
 ### 7.4 Testing
 - [ ] Unit tests for manifest parsing (valid, invalid, edge cases)

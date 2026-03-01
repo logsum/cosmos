@@ -60,4 +60,5 @@ require (
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/term v0.22.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
+	rogchap.com/v8go v0.9.0 // indirect
 )

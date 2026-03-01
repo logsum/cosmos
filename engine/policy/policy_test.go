@@ -910,3 +910,31 @@ func TestTeamOverrideLegacyRawKeyStillMatches(t *testing.T) {
 		t.Fatalf("legacy raw key should still hit override: want deny/policy_override, got %v/%v", d.Effect, d.Source)
 	}
 }
+
+// --- Security ---
+
+func TestSecurityAbsoluteEscapingRelativeGlob(t *testing.T) {
+	e, _ := testEvaluator(t)
+	rules := []manifest.PermissionRule{
+		rule(t, "fs:read:./**", manifest.PermissionAllow),
+	}
+
+	// Relative rule should not match absolute request.
+	d := e.Evaluate("agent", mustParseKey(t, "fs:read:/etc/passwd"), rules)
+	if d.Effect == EffectAllow {
+		t.Errorf("Security failure: Relative glob rule allowed absolute path access: got %v, want EffectDeny", d.Effect)
+	}
+}
+
+func TestSecurityRelativeEscapingRelativeGlob(t *testing.T) {
+	e, _ := testEvaluator(t)
+	rules := []manifest.PermissionRule{
+		rule(t, "fs:read:./**", manifest.PermissionAllow),
+	}
+
+	// Relative rule should not match path escaping via ..
+	d := e.Evaluate("agent", mustParseKey(t, "fs:read:../../etc/passwd"), rules)
+	if d.Effect == EffectAllow {
+		t.Errorf("Security failure: Relative glob rule allowed relative escape access: got %v, want EffectDeny", d.Effect)
+	}
+}

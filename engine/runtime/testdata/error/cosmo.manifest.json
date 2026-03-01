@@ -1,0 +1,19 @@
+{
+  "name": "error-agent",
+  "version": "1.0.0",
+  "description": "Throws exception for error testing",
+  "entry": "index.js",
+  "functions": [
+    {
+      "name": "fail",
+      "description": "Always throws an error",
+      "params": {
+        "reason": { "type": "string", "required": true }
+      },
+      "returns": { "type": "null", "description": "Never returns normally" }
+    }
+  ],
+  "permissions": {
+    "fs:read": "deny"
+  }
+}

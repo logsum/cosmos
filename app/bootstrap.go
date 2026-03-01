@@ -5,9 +5,10 @@ import (
 	"cosmos/config"
 	"cosmos/core"
 	"cosmos/core/provider"
+	"cosmos/engine/loader"
 	"cosmos/engine/maintenance"
 	"cosmos/engine/policy"
-	"cosmos/engine/tools"
+	"cosmos/engine/runtime"
 	"cosmos/providers/bedrock"
 	"cosmos/ui"
 	"fmt"
@@ -73,7 +74,7 @@ func Bootstrap(ctx context.Context) (*Application, error) {
 	tracker := setupTracker(notifier, currencyFormatter)
 
 	// 6. Create core session (executor, tools, adapter)
-	session, tools, err := setupSession(ctx, cfg, llmProvider, tracker, notifier)
+	session, tools, executor, err := setupSession(ctx, cfg, llmProvider, tracker, notifier)
 	if err != nil {
 		return nil, fmt.Errorf("initializing session: %w", err)
 	}
@@ -93,6 +94,7 @@ func Bootstrap(ctx context.Context) (*Application, error) {
 		Program:           program,
 		CurrencyFormatter: currencyFormatter,
 		Tracker:           tracker,
+		Executor:          executor,
 	}, nil
 }
 
@@ -152,19 +154,13 @@ func setupTracker(notifier *ui.Notifier, formatter *core.CurrencyFormatter) *cor
 }
 
 // setupSession creates the core session with executor, tools, and event adapter.
-// The ctx parameter is currently unused but kept for future extensibility
-// (e.g., when loading tools from disk, initializing V8 runtime).
 func setupSession(
-	ctx context.Context,
+	_ context.Context,
 	cfg config.Config,
 	llmProvider provider.Provider,
 	tracker *core.Tracker,
 	notifier *ui.Notifier,
-) (*core.Session, []provider.ToolDefinition, error) {
-	_ = ctx // Reserved for future use (tool loading, V8 initialization)
-
-	executor := tools.NewStubExecutor()
-	toolDefs := tools.StubToolDefinitions()
+) (*core.Session, []provider.ToolDefinition, *runtime.V8Executor, error) {
 	adapter := &coreNotifierAdapter{ui: notifier}
 
 	// Create audit logger with session ID
@@ -172,7 +168,6 @@ func setupSession(
 	cosmosDir := ".cosmos" // Project-local directory
 	auditLogger, err := policy.NewAuditLogger(sessionID, cosmosDir)
 	if err != nil {
-		// Log warning but continue (audit is non-critical for core functionality)
 		fmt.Fprintf(os.Stderr, "cosmos: warning: audit logger init failed: %v\n", err)
 		auditLogger = nil
 	}
@@ -185,7 +180,17 @@ func setupSession(
 	if err != nil {
 		// Policy file exists but is malformed or unreadable - this is a fatal error
 		// (if file doesn't exist, NewEvaluator succeeds with empty overrides)
-		return nil, nil, fmt.Errorf("policy evaluator init failed: %w", err)
+		return nil, nil, nil, fmt.Errorf("policy evaluator init failed: %w", err)
+	}
+
+	// Load agents from disk (builtin + user dirs) and wire V8 executor.
+	storageDir := filepath.Join(cosmosDir, "storage")
+	result, err := loader.Load("engine/agents", cfg.AgentsDir, storageDir, evaluator, nil)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading agents: %w", err)
+	}
+	for _, agentErr := range result.Errors {
+		fmt.Fprintf(os.Stderr, "cosmos: warning: agent %s: %v\n", agentErr.Dir, agentErr.Err)
 	}
 
 	// Pass the same sessionID to both audit logger and session
@@ -197,13 +202,13 @@ func setupSession(
 		cfg.DefaultModel,
 		"You are a helpful coding assistant with access to tools.",
 		4096, // MaxTokens
-		executor,
-		toolDefs,
+		result.Executor,
+		result.Tools,
 		auditLogger,
 		evaluator,
 	)
 
-	return session, toolDefs, nil
+	return session, result.Tools, result.Executor, nil
 }
 
 // configureUI sets up scaffold pages and status bar items.

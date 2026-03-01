@@ -285,6 +285,24 @@ func (e *Evaluator) matchRule(rule, requested manifest.PermissionKey) (tier int,
 	ruleTarget := filepath.Clean(expandTilde(rule.Target, e.homeDir))
 	reqTarget := filepath.Clean(expandTilde(requested.Target, e.homeDir))
 
+	// Security: Relative rules (e.g., ./src/**) should not match absolute
+	// requests (e.g., /etc/passwd). Similarly, relative requests should
+	// not escape the current directory via .. if the rule target is anchored
+	// to the current directory (no .. prefix).
+	ruleIsAbs := filepath.IsAbs(ruleTarget)
+	reqIsAbs := filepath.IsAbs(reqTarget)
+
+	if !ruleIsAbs && reqIsAbs {
+		return -1, 0
+	}
+	if !ruleIsAbs && !reqIsAbs {
+		ruleEscapes := strings.HasPrefix(ruleTarget, "..")
+		reqEscapes := strings.HasPrefix(reqTarget, "..")
+		if !ruleEscapes && reqEscapes {
+			return -1, 0
+		}
+	}
+
 	// Exact match.
 	if ruleTarget == reqTarget {
 		return 2, len(rule.Target)
@@ -419,6 +437,11 @@ func (e *Evaluator) writePolicyLocked() error {
 		return fmt.Errorf("create policy temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod policy temp file: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
