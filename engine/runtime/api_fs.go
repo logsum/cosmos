@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	v8 "rogchap.com/v8go"
 )
@@ -22,8 +23,7 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, "fs.read: "+err.Error())
 		}
-		path = filepath.Clean(path)
-		path, err = resolveSymlinks(path)
+		path, err = canonicalizePath(path)
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.read: resolve path: %s", err))
 		}
@@ -56,8 +56,7 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, "fs.write: "+err.Error())
 		}
-		path = filepath.Clean(path)
-		path, err = resolveSymlinks(path)
+		path, err = canonicalizePath(path)
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.write: resolve path: %s", err))
 		}
@@ -72,12 +71,34 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 		}
 
 		// Ensure parent directory exists.
-		if err := os.MkdirAll(parentDir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.write: mkdir: %s", err))
 		}
 
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		// Re-resolve parent after MkdirAll to detect TOCTOU symlink swaps.
+		path, err = canonicalizePath(path)
+		if err != nil {
+			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.write: re-resolve path: %s", err))
+		}
+
+		// Re-check permission on the re-resolved path.
+		if err := checkPermission(ctx, "fs:write:"+path); err != nil {
+			return throwJSError(v8iso, v8ctx, err.Error())
+		}
+
+		// Open with O_NOFOLLOW: if the final component is a symlink, open
+		// fails with ELOOP, preventing symlink-based path escapes.
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
+		if err != nil {
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.write: %s", err))
+		}
+		_, writeErr := f.WriteString(content)
+		closeErr := f.Close()
+		if writeErr != nil {
+			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.write: %s", writeErr))
+		}
+		if closeErr != nil {
+			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.write: close: %s", closeErr))
 		}
 
 		return v8.Undefined(v8iso)
@@ -95,8 +116,7 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, "fs.list: "+err.Error())
 		}
-		path = filepath.Clean(path)
-		path, err = resolveSymlinks(path)
+		path, err = canonicalizePath(path)
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.list: resolve path: %s", err))
 		}
@@ -142,8 +162,7 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, "fs.stat: "+err.Error())
 		}
-		path = filepath.Clean(path)
-		path, err = resolveSymlinks(path)
+		path, err = canonicalizePath(path)
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.stat: resolve path: %s", err))
 		}
@@ -183,8 +202,7 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, "fs.unlink: "+err.Error())
 		}
-		path = filepath.Clean(path)
-		path, err = resolveSymlinks(path)
+		path, err = canonicalizePath(path)
 		if err != nil {
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.unlink: resolve path: %s", err))
 		}
@@ -192,6 +210,15 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 		// Destructive — uses write permission.
 		if err := checkPermission(ctx, "fs:write:"+path); err != nil {
 			return throwJSError(v8iso, v8ctx, err.Error())
+		}
+
+		// Use Lstat to check the target is not a symlink before removing.
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.unlink: %s", err))
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.unlink: refusing to remove symlink %s", path))
 		}
 
 		if err := os.Remove(path); err != nil {
@@ -210,11 +237,25 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 	return nil
 }
 
-// resolveSymlinks resolves symlinks in the given path so permission checks
-// operate on the real filesystem path, preventing symlink-based scope escapes.
-// For paths where the final component doesn't exist yet (e.g., fs.write to a
-// new file), it resolves the parent directory and joins the base name.
-func resolveSymlinks(path string) (string, error) {
+// canonicalizePath cleans and resolves a path to its absolute, symlink-free
+// form so that permission checks operate on the real filesystem path.
+//
+// For existing paths, filepath.EvalSymlinks resolves the entire chain.
+// For new files (not yet on disk), the parent directory is resolved and the
+// base name is appended. The result is always absolute.
+func canonicalizePath(path string) (string, error) {
+	path = filepath.Clean(path)
+
+	// Make relative paths absolute against cwd.
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("getwd: %w", err)
+		}
+		path = filepath.Join(cwd, path)
+	}
+
+	// Try full resolution (works for existing files).
 	resolved, err := filepath.EvalSymlinks(path)
 	if err == nil {
 		return resolved, nil
@@ -222,15 +263,11 @@ func resolveSymlinks(path string) (string, error) {
 	if !os.IsNotExist(err) {
 		return "", err
 	}
+
 	// File doesn't exist yet — resolve the parent directory.
 	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(parent, filepath.Base(path)), nil
-}
-
-// parentDir returns the parent directory of a file path.
-func parentDir(path string) string {
-	return filepath.Dir(path)
 }

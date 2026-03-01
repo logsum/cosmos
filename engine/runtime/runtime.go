@@ -1,9 +1,14 @@
 package runtime
 
+// Lock ordering: e.mu → ti.mu (never hold e.mu while acquiring ti.mu in the
+// opposite direction). Close() and Execute() both release e.mu before or
+// immediately after acquiring ti.mu to maintain consistent ordering.
+
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"strings"
@@ -20,12 +25,19 @@ import (
 // Rejects names that could cause script injection when interpolated.
 var jsIdentifierRe = regexp.MustCompile(`^[a-zA-Z_$][a-zA-Z0-9_$]*$`)
 
+// agentNameRe matches valid agent names: lowercase alphanumeric with hyphens/underscores.
+var agentNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
 const (
 	// MaxToolTimeout is the absolute ceiling for any tool execution.
 	MaxToolTimeout = 5 * time.Minute
 
 	// DefaultToolTimeout is used when the manifest has no timeout.
 	DefaultToolTimeout = 30 * time.Second
+
+	// isolateGracePeriod is how long to wait for a terminated V8 isolate
+	// goroutine to exit before deciding whether to leak it.
+	isolateGracePeriod = 5 * time.Second
 )
 
 // ToolSpec contains everything needed to compile one tool.
@@ -44,6 +56,7 @@ type toolIsolate struct {
 	ctx      *v8.Context
 	modTime  time.Time
 	compiled bool
+	leaked   bool // true if isolate timed out and goroutine may still be running
 }
 
 // toolEntry pairs a spec with its lazy-loaded isolate.
@@ -64,20 +77,31 @@ type V8Executor struct {
 	allowLoopback  bool // skip loopback/private IP check in HTTP (for testing)
 }
 
-// NewV8Executor creates an executor with the given API registry and optional
+// NewV8Executor creates an executor with a default API registry and optional
 // per-tool context dependencies. Pass nil evaluator to skip permission checks
 // (test/stub mode). Pass nil uiEmit for silent ui.emit (no-op).
-func NewV8Executor(registry *APIRegistry, evaluator *policy.Evaluator, storageDir string, uiEmit UIEmitFunc) *V8Executor {
-	if registry == nil {
-		registry = NewAPIRegistry()
-	}
+func NewV8Executor(evaluator *policy.Evaluator, storageDir string, uiEmit UIEmitFunc) *V8Executor {
 	return &V8Executor{
 		tools:      make(map[string]*toolEntry),
-		registry:   registry,
+		registry:   NewAPIRegistry(),
 		evaluator:  evaluator,
 		storageDir: storageDir,
 		uiEmit:     uiEmit,
 	}
+}
+
+// ToolPermissionRules returns the agent name and parsed permission rules
+// for a registered tool. Returns false if the tool is not registered.
+// This enables the core loop to evaluate manifest permissions without
+// importing the engine/runtime package directly.
+func (e *V8Executor) ToolPermissionRules(name string) (agentName string, rules []manifest.PermissionRule, ok bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	entry, found := e.tools[name]
+	if !found {
+		return "", nil, false
+	}
+	return entry.spec.AgentName, entry.spec.Manifest.ParsedPermissions, true
 }
 
 // RegisterTool adds a tool spec. The V8 isolate is NOT created until
@@ -86,6 +110,10 @@ func NewV8Executor(registry *APIRegistry, evaluator *policy.Evaluator, storageDi
 func (e *V8Executor) RegisterTool(spec ToolSpec) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if spec.AgentName != "" && !agentNameRe.MatchString(spec.AgentName) {
+		return fmt.Errorf("invalid agent name %q: must match [a-z0-9][a-z0-9_-]*", spec.AgentName)
+	}
 
 	if !jsIdentifierRe.MatchString(spec.FunctionName) {
 		return fmt.Errorf("tool function name %q is not a valid JS identifier", spec.FunctionName)
@@ -106,16 +134,23 @@ func (e *V8Executor) RegisterTool(spec ToolSpec) error {
 //
 //	func (e *V8Executor) Execute(ctx context.Context, name string, input map[string]any) (string, error)
 func (e *V8Executor) Execute(ctx context.Context, name string, input map[string]any) (string, error) {
+	// Hold executor lock until isolate lock is acquired to prevent a race
+	// where Close() disposes the isolate between map lookup and ti.mu.Lock().
 	e.mu.Lock()
 	entry, ok := e.tools[name]
-	e.mu.Unlock()
 	if !ok {
+		e.mu.Unlock()
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
-
 	ti := entry.isolate
 	ti.mu.Lock()
+	e.mu.Unlock() // Release after isolate lock acquired
 	defer ti.mu.Unlock()
+
+	// Refuse to execute if isolate leaked (timed-out write agent still running).
+	if ti.leaked {
+		return "", fmt.Errorf("tool %s isolate leaked (previous execution timed out and did not terminate)", name)
+	}
 
 	// Hot reload: check for source file changes.
 	if err := e.maybeReload(entry); err != nil {
@@ -241,33 +276,61 @@ func (e *V8Executor) executeWithTimeout(ctx context.Context, entry *toolEntry, i
 	select {
 	case r := <-resultCh:
 		if r.err != nil {
+			// Any JS error invalidates the isolate — force recompile on next call.
+			e.disposeIsolate(ti)
 			return "", wrapJSError(r.err, entry.spec.SourcePath)
 		}
 		return r.val, nil
 
 	case <-time.After(timeout):
 		ti.iso.TerminateExecution()
-		// Drain the result channel so the goroutine can exit.
-		<-resultCh
-		// Terminated isolate is unusable; dispose and force recompile.
-		e.disposeIsolate(ti)
+		// Wait a grace period for the goroutine to exit before disposing.
+		select {
+		case <-resultCh:
+			// Goroutine completed within grace period, safe to dispose.
+			e.disposeIsolate(ti)
+		case <-time.After(isolateGracePeriod):
+			if hasWritePermissions(&entry.spec.Manifest) {
+				log.Printf("WARNING: leaking V8 isolate for %s (write agent did not terminate within grace period)", entry.spec.FunctionName)
+				// Mark isolate as leaked so subsequent Execute calls will fail.
+				ti.leaked = true
+			} else {
+				e.disposeIsolate(ti) // Force dispose for read-only agents.
+			}
+		}
 		return "", fmt.Errorf("tool %s timed out after %s", entry.spec.FunctionName, timeout)
 
 	case <-ctx.Done():
 		ti.iso.TerminateExecution()
-		<-resultCh
-		e.disposeIsolate(ti)
+		// Wait a grace period for the goroutine to exit before disposing.
+		select {
+		case <-resultCh:
+			e.disposeIsolate(ti)
+		case <-time.After(isolateGracePeriod):
+			if hasWritePermissions(&entry.spec.Manifest) {
+				log.Printf("WARNING: leaking V8 isolate for %s (write agent did not terminate within grace period)", entry.spec.FunctionName)
+				// Mark isolate as leaked so subsequent Execute calls will fail.
+				ti.leaked = true
+			} else {
+				e.disposeIsolate(ti)
+			}
+		}
 		return "", fmt.Errorf("tool %s cancelled: %w", entry.spec.FunctionName, ctx.Err())
 	}
 }
 
 // Close disposes all V8 isolates. Safe to call multiple times.
 func (e *V8Executor) Close() {
+	// Snapshot the tools map under executor lock, then release it before
+	// acquiring individual isolate locks (maintains e.mu → ti.mu ordering).
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
+	isolates := make([]*toolIsolate, 0, len(e.tools))
 	for _, entry := range e.tools {
-		ti := entry.isolate
+		isolates = append(isolates, entry.isolate)
+	}
+	e.mu.Unlock()
+
+	for _, ti := range isolates {
 		ti.mu.Lock()
 		e.disposeIsolate(ti)
 		ti.mu.Unlock()
@@ -286,6 +349,24 @@ func (e *V8Executor) disposeIsolate(ti *toolIsolate) {
 		ti.iso = nil
 	}
 	ti.compiled = false
+}
+
+// hasWritePermissions returns true if the manifest declares any non-deny
+// write or docker permissions, indicating in-flight operations that could
+// corrupt state if the isolate is forcefully disposed.
+func hasWritePermissions(m *manifest.Manifest) bool {
+	if m == nil {
+		return false
+	}
+	for key, mode := range m.Permissions {
+		if mode == manifest.PermissionDeny {
+			continue
+		}
+		if strings.HasPrefix(key, "fs:write") || strings.HasPrefix(key, "docker:") {
+			return true
+		}
+	}
+	return false
 }
 
 // effectiveTimeout returns the timeout for a tool, clamped to MaxToolTimeout.

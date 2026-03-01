@@ -123,7 +123,7 @@ func Load(builtinDir, userDir, storageDir string,
 
 	// 5. Create V8Executor and register tools.
 	// Only advertise tools that register successfully.
-	executor := runtime.NewV8Executor(nil, evaluator, storageDir, uiEmit)
+	executor := runtime.NewV8Executor(evaluator, storageDir, uiEmit)
 	var toolDefs []provider.ToolDefinition
 	for _, te := range toolEntries {
 		if err := executor.RegisterTool(te.spec); err != nil {

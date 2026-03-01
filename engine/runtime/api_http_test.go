@@ -26,7 +26,7 @@ func TestHttpGet(t *testing.T) {
 	}
 	toolCtx := testToolContext(t, "http-agent", permissions)
 
-	e := NewV8Executor(nil, toolCtx.Evaluator, "", nil)
+	e := NewV8Executor(toolCtx.Evaluator, "", nil)
 	e.allowLoopback = true // test server is on localhost
 	defer e.Close()
 
@@ -88,7 +88,7 @@ func TestHttpPost(t *testing.T) {
 	}
 	toolCtx := testToolContext(t, "http-agent", permissions)
 
-	e := NewV8Executor(nil, toolCtx.Evaluator, "", nil)
+	e := NewV8Executor(toolCtx.Evaluator, "", nil)
 	e.allowLoopback = true // test server is on localhost
 	defer e.Close()
 
@@ -151,7 +151,7 @@ func TestHttp_RedirectBlocked(t *testing.T) {
 	}
 	toolCtx := testToolContext(t, "http-agent", permissions)
 
-	e := NewV8Executor(nil, toolCtx.Evaluator, "", nil)
+	e := NewV8Executor(toolCtx.Evaluator, "", nil)
 	e.allowLoopback = true // both servers are on localhost
 	defer e.Close()
 
@@ -186,7 +186,7 @@ func TestHttp_LoopbackBlocked(t *testing.T) {
 	toolCtx := testToolContext(t, "http-agent", permissions)
 	// AllowLoopback NOT set — default false.
 
-	e := NewV8Executor(nil, toolCtx.Evaluator, "", nil)
+	e := NewV8Executor(toolCtx.Evaluator, "", nil)
 	defer e.Close()
 
 	tmpDir := t.TempDir()
@@ -233,7 +233,7 @@ func TestHttp_PermissionDenied(t *testing.T) {
 	}
 	toolCtx := testToolContext(t, "http-agent", permissions)
 
-	e := NewV8Executor(nil, toolCtx.Evaluator, "", nil)
+	e := NewV8Executor(toolCtx.Evaluator, "", nil)
 	defer e.Close()
 
 	tmpDir := t.TempDir()

@@ -153,6 +153,16 @@ func redactSensitiveRecursive(key string, value any) any {
 		}
 	}
 
+	// For string values: check if content contains sensitive patterns
+	if str, ok := value.(string); ok {
+		lowerVal := strings.ToLower(str)
+		for _, pattern := range sensitivePatterns {
+			if strings.Contains(lowerVal, pattern) {
+				return "[REDACTED]"
+			}
+		}
+	}
+
 	// Safe primitive value
 	return value
 }

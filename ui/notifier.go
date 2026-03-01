@@ -17,19 +17,22 @@ type UpdateMsg struct{}
 //   - Notify(): sends an idempotent re-render signal via a buffered channel.
 //     Drops are harmless since the next render will pick up current state.
 //   - Send(msg): delivers a data-carrying message via tea.Program.Send(),
-//     which is goroutine-safe and unbounded. Falls back to the channel
-//     if the program has not been set yet (pre-Run).
+//     which is goroutine-safe and unbounded. Blocks until SetProgram() has
+//     been called (prevents silent drops during initialization).
 type Notifier struct {
 	rcv       chan any
 	listening bool
 	mu        sync.Mutex
 	program   *tea.Program
+	initWg    sync.WaitGroup // blocks Send() until SetProgram() is called
 }
 
 func newNotifier() *Notifier {
-	return &Notifier{
+	n := &Notifier{
 		rcv: make(chan any, 256),
 	}
+	n.initWg.Add(1)
+	return n
 }
 
 // SetProgram stores a reference to the running tea.Program, enabling
@@ -37,6 +40,7 @@ func newNotifier() *Notifier {
 // after tea.NewProgram() and before p.Run().
 func (n *Notifier) SetProgram(p *tea.Program) {
 	n.program = p
+	n.initWg.Done()
 }
 
 // Listen returns a tea.Cmd that blocks until a notification is sent.
@@ -67,18 +71,18 @@ func (n *Notifier) Notify() {
 }
 
 // Send delivers a data-carrying message to the Bubble Tea runtime.
-// If the tea.Program has been set (via SetProgram), it uses p.Send()
-// which is goroutine-safe and unbounded. Otherwise, it falls back to
-// the buffered channel and logs a warning if the message is dropped.
+// Blocks until SetProgram() has been called to ensure no messages are
+// silently dropped during initialization.
 func (n *Notifier) Send(msg tea.Msg) {
+	n.initWg.Wait()
 	if n.program != nil {
 		n.program.Send(msg)
 		return
 	}
-	// Pre-Run() fallback: use the channel.
+	// Defensive fallback (should not happen after SetProgram).
 	select {
 	case n.rcv <- msg:
 	default:
-		log.Printf("notifier: dropped message %T (program not yet set, channel full)", msg)
+		log.Printf("notifier: dropped message %T (channel full)", msg)
 	}
 }

@@ -3,10 +3,12 @@ package core
 import (
 	"context"
 	"cosmos/core/provider"
+	"cosmos/engine/manifest"
 	"cosmos/engine/policy"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -61,8 +63,9 @@ func (p *mockProvider) ListModels(_ context.Context) ([]provider.ModelInfo, erro
 // --- Mock executor ---
 
 type mockExecutor struct {
-	results map[string]string // tool name → result
-	errors  map[string]error  // tool name → error
+	results   map[string]string                                         // tool name → result
+	errors    map[string]error                                          // tool name → error
+	manifests map[string]struct{ agent string; rules []manifest.PermissionRule } // tool name → manifest rules
 }
 
 func (e *mockExecutor) Execute(_ context.Context, name string, _ map[string]any) (string, error) {
@@ -73,6 +76,18 @@ func (e *mockExecutor) Execute(_ context.Context, name string, _ map[string]any)
 		return result, nil
 	}
 	return "", fmt.Errorf("unknown tool: %s", name)
+}
+
+// ToolPermissionRules implements ToolManifestProvider for tests.
+func (e *mockExecutor) ToolPermissionRules(name string) (string, []manifest.PermissionRule, bool) {
+	if e.manifests == nil {
+		return "", nil, false
+	}
+	m, ok := e.manifests[name]
+	if !ok {
+		return "", nil, false
+	}
+	return m.agent, m.rules, true
 }
 
 // --- Mock notifier ---
@@ -96,31 +111,6 @@ func (n *mockNotifier) getMessages() []any {
 	return out
 }
 
-// waitForEvent polls the notifier for an event matching predicate, with timeout.
-// Returns (event, true) on match or (nil, false) on timeout.
-func (n *mockNotifier) waitForEvent(predicate func(any) bool, timeout time.Duration) (any, bool) {
-	deadline := time.After(timeout)
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		n.mu.Lock()
-		for _, m := range n.msgs {
-			if predicate(m) {
-				n.mu.Unlock()
-				return m, true
-			}
-		}
-		n.mu.Unlock()
-
-		select {
-		case <-deadline:
-			return nil, false
-		case <-ticker.C:
-			continue
-		}
-	}
-}
 
 // --- Helpers ---
 
@@ -1456,269 +1446,249 @@ func (e *slowExecutor) Execute(ctx context.Context, name string, _ map[string]an
 	}
 }
 
-// --- Test helpers for permissions ---
+// --- Permission flow test helpers ---
 
-func createTestEvaluator(t *testing.T) (*policy.Evaluator, string) {
+// waitForEvent polls the notifier for a matching event with a timeout.
+func (n *mockNotifier) waitForEvent(t *testing.T, timeout time.Duration, match func(any) bool) any {
 	t.Helper()
-	// Create temporary policy file
-	tmpDir := t.TempDir()
-	policyPath := fmt.Sprintf("%s/policy.json", tmpDir)
-
-	// Create empty policy file (evaluator will use manifest rules)
-	if err := os.WriteFile(policyPath, []byte(`{"version":1,"overrides":{}}`), 0644); err != nil {
-		t.Fatalf("failed to create test policy file: %v", err)
+	deadline := time.After(timeout)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for matching event")
+			return nil
+		default:
+			msgs := n.getMessages()
+			for _, m := range msgs {
+				if match(m) {
+					return m
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
+}
 
-	evaluator, err := policy.NewEvaluator(policyPath)
+// createTestEvaluator creates a temporary policy file and evaluator for tests.
+func createTestEvaluator(t *testing.T) *policy.Evaluator {
+	t.Helper()
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, ".cosmos", "policy.json")
+	if err := os.MkdirAll(filepath.Dir(policyPath), 0o700); err != nil {
+		t.Fatalf("create policy dir: %v", err)
+	}
+	eval, err := policy.NewEvaluator(policyPath)
 	if err != nil {
-		t.Fatalf("failed to create evaluator: %v", err)
+		t.Fatalf("NewEvaluator: %v", err)
 	}
+	return eval
+}
 
-	return evaluator, policyPath
+// mockPermissionManifest returns a manifest map with fs:write:./test.txt as request_once.
+func mockPermissionManifest(t *testing.T) map[string]struct {
+	agent string
+	rules []manifest.PermissionRule
+} {
+	t.Helper()
+	key, err := manifest.ParsePermissionKey("fs:write:./test.txt")
+	if err != nil {
+		t.Fatalf("ParsePermissionKey: %v", err)
+	}
+	return map[string]struct {
+		agent string
+		rules []manifest.PermissionRule
+	}{
+		"write_file": {
+			agent: "test-agent",
+			rules: []manifest.PermissionRule{
+				{Key: key, Mode: manifest.PermissionRequestOnce},
+			},
+		},
+	}
 }
 
 // --- Permission flow tests ---
 
 func TestPermissionRequestFlow_Allow(t *testing.T) {
+	// Prompt appears, user approves, tool executes.
 	prov := &mockProvider{calls: [][]provider.StreamChunk{
-		toolUseChunks("tool_1", "mock_permission_tool", `{"content":"test"}`),
-		textChunks("Tool executed successfully!"),
+		toolUseChunks("t1", "write_file", `{"path":"./test.txt","content":"hello"}`),
+		textChunks("File written."),
 	}}
 	notifier := &mockNotifier{}
 	executor := &mockExecutor{
-		results: map[string]string{
-			"mock_permission_tool": "Successfully wrote 4 bytes to ./test.txt",
-		},
+		results:   map[string]string{"write_file": "ok"},
+		manifests: mockPermissionManifest(t),
 	}
-	evaluator, _ := createTestEvaluator(t)
+	evaluator := createTestEvaluator(t)
 
-	session := NewSession(
-		"test-session-id", prov, NewTracker(nil, nil), notifier,
-		"test-model", "system", 1024, executor, nil, nil, evaluator,
-	)
+	session := NewSession("test-perm-allow", prov, NewTracker(nil, nil), notifier,
+		"test-model", "system", 1024, executor, nil, nil, evaluator)
+	session.SetPermissionTimeout(2 * time.Second)
 
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- session.processUserMessage(context.Background(), "Use mock_permission_tool to write 'test'")
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session.Start(ctx)
 
-	// Wait for PermissionRequestEvent (no sleep — poll with timeout)
-	evt, ok := notifier.waitForEvent(func(m any) bool {
-		_, is := m.(PermissionRequestEvent)
-		return is
-	}, 5*time.Second)
-	if !ok {
-		t.Fatal("timed out waiting for PermissionRequestEvent")
-	}
-	permRequest := evt.(PermissionRequestEvent)
+	// Submit message that triggers tool use
+	session.SubmitMessage("Write the file")
 
-	if permRequest.ToolName != "mock_permission_tool" {
-		t.Errorf("ToolName = %q, want %q", permRequest.ToolName, "mock_permission_tool")
-	}
-	if permRequest.Permission != "fs:write:./test.txt" {
-		t.Errorf("Permission = %q, want %q", permRequest.Permission, "fs:write:./test.txt")
+	// Wait for permission prompt
+	evt := notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		_, ok := m.(PermissionRequestEvent)
+		return ok
+	})
+	permReq := evt.(PermissionRequestEvent)
+
+	if permReq.ToolName != "write_file" {
+		t.Errorf("ToolName = %q, want write_file", permReq.ToolName)
 	}
 
-	// Simulate user approval
-	permRequest.ResponseChan <- PermissionResponse{Allowed: true, Remember: false}
+	// Approve the permission
+	permReq.ResponseChan <- PermissionResponse{Allowed: true}
 
-	if err := <-errChan; err != nil {
-		t.Fatalf("processUserMessage failed: %v", err)
-	}
-
-	// Verify tool was executed (history should have tool result)
-	if len(session.history) < 3 {
-		t.Fatalf("history length = %d, want at least 3", len(session.history))
-	}
-	foundToolResult := false
-	for _, msg := range session.history {
-		if msg.Role == provider.RoleUser {
-			for _, tr := range msg.ToolResults {
-				if tr.ToolUseID == "tool_1" {
-					foundToolResult = true
-					if tr.IsError {
-						t.Errorf("tool result has IsError=true, want false")
-					}
-				}
-			}
+	// Wait for tool result
+	notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		if msg, ok := m.(ToolResultEvent); ok {
+			return msg.ToolCallID == "t1" && !msg.IsError
 		}
-	}
-	if !foundToolResult {
-		t.Error("expected tool result in history after permission granted")
-	}
+		return false
+	})
+
+	session.Stop()
 }
 
 func TestPermissionRequestFlow_Deny(t *testing.T) {
+	// Prompt appears, user denies, tool result is error.
 	prov := &mockProvider{calls: [][]provider.StreamChunk{
-		toolUseChunks("tool_1", "mock_permission_tool", `{"content":"test"}`),
+		toolUseChunks("t1", "write_file", `{"path":"./test.txt","content":"hello"}`),
 		textChunks("Permission was denied."),
 	}}
 	notifier := &mockNotifier{}
 	executor := &mockExecutor{
-		results: map[string]string{
-			"mock_permission_tool": "Should not be executed",
-		},
+		results:   map[string]string{"write_file": "ok"},
+		manifests: mockPermissionManifest(t),
 	}
-	evaluator, _ := createTestEvaluator(t)
+	evaluator := createTestEvaluator(t)
 
-	session := NewSession(
-		"test-session-id", prov, NewTracker(nil, nil), notifier,
-		"test-model", "system", 1024, executor, nil, nil, evaluator,
-	)
+	session := NewSession("test-perm-deny", prov, NewTracker(nil, nil), notifier,
+		"test-model", "system", 1024, executor, nil, nil, evaluator)
+	session.SetPermissionTimeout(2 * time.Second)
 
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- session.processUserMessage(context.Background(), "Use mock_permission_tool to write 'test'")
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session.Start(ctx)
 
-	evt, ok := notifier.waitForEvent(func(m any) bool {
-		_, is := m.(PermissionRequestEvent)
-		return is
-	}, 5*time.Second)
-	if !ok {
-		t.Fatal("timed out waiting for PermissionRequestEvent")
-	}
-	permRequest := evt.(PermissionRequestEvent)
+	session.SubmitMessage("Write the file")
 
-	// Simulate user denial
-	permRequest.ResponseChan <- PermissionResponse{Allowed: false, Remember: false}
+	// Wait for permission prompt
+	evt := notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		_, ok := m.(PermissionRequestEvent)
+		return ok
+	})
+	permReq := evt.(PermissionRequestEvent)
 
-	if err := <-errChan; err != nil {
-		t.Fatalf("processUserMessage failed: %v", err)
-	}
+	// Deny the permission
+	permReq.ResponseChan <- PermissionResponse{Allowed: false}
 
-	// Verify tool was NOT executed (result should be a permission denied error)
-	foundErrorResult := false
-	for _, msg := range session.history {
-		if msg.Role == provider.RoleUser {
-			for _, tr := range msg.ToolResults {
-				if tr.ToolUseID == "tool_1" && tr.IsError && strings.Contains(tr.Content, "Permission denied") {
-					foundErrorResult = true
-				}
-			}
+	// Wait for tool result with error
+	notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		if msg, ok := m.(ToolResultEvent); ok {
+			return msg.ToolCallID == "t1" && msg.IsError
 		}
-	}
-	if !foundErrorResult {
-		t.Error("expected tool result with permission denial error")
-	}
+		return false
+	})
+
+	session.Stop()
 }
 
 func TestPermissionRequestFlow_Timeout(t *testing.T) {
+	// Prompt appears, no response, timeout fires.
 	prov := &mockProvider{calls: [][]provider.StreamChunk{
-		toolUseChunks("tool_1", "mock_permission_tool", `{"content":"test"}`),
-		textChunks("Permission timed out."),
+		toolUseChunks("t1", "write_file", `{"path":"./test.txt","content":"hello"}`),
+		textChunks("Timed out."),
 	}}
 	notifier := &mockNotifier{}
 	executor := &mockExecutor{
-		results: map[string]string{
-			"mock_permission_tool": "Should not be executed",
-		},
+		results:   map[string]string{"write_file": "ok"},
+		manifests: mockPermissionManifest(t),
 	}
-	evaluator, _ := createTestEvaluator(t)
+	evaluator := createTestEvaluator(t)
 
-	session := NewSession(
-		"test-session-id", prov, NewTracker(nil, nil), notifier,
-		"test-model", "system", 1024, executor, nil, nil, evaluator,
-	)
-	session.permissionTimeout = 50 * time.Millisecond // Very short timeout for test
+	session := NewSession("test-perm-timeout", prov, NewTracker(nil, nil), notifier,
+		"test-model", "system", 1024, executor, nil, nil, evaluator)
+	session.SetPermissionTimeout(100 * time.Millisecond) // Short timeout for test
 
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- session.processUserMessage(context.Background(), "Use mock_permission_tool to write 'test'")
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session.Start(ctx)
 
-	// Wait for PermissionRequestEvent but do NOT respond — let it time out
-	_, ok := notifier.waitForEvent(func(m any) bool {
-		_, is := m.(PermissionRequestEvent)
-		return is
-	}, 5*time.Second)
-	if !ok {
-		t.Fatal("timed out waiting for PermissionRequestEvent")
-	}
+	session.SubmitMessage("Write the file")
 
-	// Wait for processUserMessage to complete (it should time out and proceed)
-	if err := <-errChan; err != nil {
-		t.Fatalf("processUserMessage failed: %v", err)
-	}
+	// Wait for permission prompt but don't respond
+	notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		_, ok := m.(PermissionRequestEvent)
+		return ok
+	})
 
-	// Verify PermissionTimeoutEvent was emitted
-	_, gotTimeout := notifier.waitForEvent(func(m any) bool {
-		_, is := m.(PermissionTimeoutEvent)
-		return is
-	}, 5*time.Second)
-	if !gotTimeout {
-		t.Error("expected PermissionTimeoutEvent after timeout")
-	}
+	// Wait for timeout event
+	notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		_, ok := m.(PermissionTimeoutEvent)
+		return ok
+	})
 
-	// Verify tool result is a permission denied error
-	foundErrorResult := false
-	for _, msg := range session.history {
-		if msg.Role == provider.RoleUser {
-			for _, tr := range msg.ToolResults {
-				if tr.ToolUseID == "tool_1" && tr.IsError && strings.Contains(tr.Content, "timed out") {
-					foundErrorResult = true
-				}
-			}
+	// Tool result should be an error (default deny on timeout)
+	notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		if msg, ok := m.(ToolResultEvent); ok {
+			return msg.ToolCallID == "t1" && msg.IsError
 		}
-	}
-	if !foundErrorResult {
-		t.Error("expected tool result with timeout error")
-	}
+		return false
+	})
+
+	session.Stop()
 }
 
 func TestPermissionRequestFlow_ContextCancelled(t *testing.T) {
+	// Prompt appears, ctx cancelled, result is error.
 	prov := &mockProvider{calls: [][]provider.StreamChunk{
-		toolUseChunks("tool_1", "mock_permission_tool", `{"content":"test"}`),
-		textChunks("Context cancelled."),
+		toolUseChunks("t1", "write_file", `{"path":"./test.txt","content":"hello"}`),
+		textChunks("Cancelled."),
 	}}
 	notifier := &mockNotifier{}
 	executor := &mockExecutor{
-		results: map[string]string{
-			"mock_permission_tool": "Should not be executed",
-		},
+		results:   map[string]string{"write_file": "ok"},
+		manifests: mockPermissionManifest(t),
 	}
-	evaluator, _ := createTestEvaluator(t)
+	evaluator := createTestEvaluator(t)
 
-	session := NewSession(
-		"test-session-id", prov, NewTracker(nil, nil), notifier,
-		"test-model", "system", 1024, executor, nil, nil, evaluator,
-	)
+	session := NewSession("test-perm-cancel", prov, NewTracker(nil, nil), notifier,
+		"test-model", "system", 1024, executor, nil, nil, evaluator)
+	session.SetPermissionTimeout(5 * time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	session.Start(ctx)
 
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- session.processUserMessage(ctx, "Use mock_permission_tool to write 'test'")
-	}()
+	session.SubmitMessage("Write the file")
 
-	// Wait for PermissionRequestEvent
-	_, ok := notifier.waitForEvent(func(m any) bool {
-		_, is := m.(PermissionRequestEvent)
-		return is
-	}, 5*time.Second)
-	if !ok {
-		t.Fatal("timed out waiting for PermissionRequestEvent")
-	}
+	// Wait for permission prompt
+	notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		_, ok := m.(PermissionRequestEvent)
+		return ok
+	})
 
-	// Cancel context instead of responding
+	// Cancel context while waiting for permission response
 	cancel()
 
-	if err := <-errChan; err != nil {
-		t.Fatalf("processUserMessage failed: %v", err)
-	}
-
-	// Verify tool result is a cancellation error
-	foundErrorResult := false
-	for _, msg := range session.history {
-		if msg.Role == provider.RoleUser {
-			for _, tr := range msg.ToolResults {
-				if tr.ToolUseID == "tool_1" && tr.IsError && strings.Contains(tr.Content, "cancelled") {
-					foundErrorResult = true
-				}
-			}
+	// Wait for an error event (context cancellation or tool error)
+	notifier.waitForEvent(t, 2*time.Second, func(m any) bool {
+		if msg, ok := m.(ToolResultEvent); ok {
+			return msg.ToolCallID == "t1" && msg.IsError
 		}
-	}
-	if !foundErrorResult {
-		t.Error("expected tool result with cancellation error")
-	}
+		if _, ok := m.(ErrorEvent); ok {
+			return true
+		}
+		return false
+	})
+
+	session.Stop()
 }

@@ -8,6 +8,10 @@ Cosmos is a secure coding agent with a TUI (Terminal User Interface) built in Go
 
 The LLM orchestrates agents and tools. Tools run sandboxed in V8. Every permission is declared in a manifest, evaluated by a policy engine, and logged in an audit trail. The user sees everything in a tabbed terminal interface and approves sensitive operations inline in the chat.
 
+## Platform Support
+
+Cosmos targets **macOS and Linux only**. Windows is not supported and there are no plans to add Windows support. Platform-specific code (e.g., `os.Rename` atomicity, symlink handling, `O_NOFOLLOW` flags) assumes POSIX semantics without Windows compatibility shims.
+
 ## Build and Run Commands
 
 ```bash
@@ -475,9 +479,9 @@ Tools have zero direct host access. All capabilities come from Go-side APIs inje
 
 **Permission Integration:**
 
-- ⚠️ **Currently limited**: Only `mock_permission_tool` triggers real permission checks
-- All other tools bypass permission enforcement (development mode)
-- **TODO**: Wire manifest permission loading during tool execution (`core/loop.go:732`)
+- ✅ All tools are evaluated against their manifest permission rules via `ToolManifestProvider` interface
+- Tools with no declared permissions are treated as pure functions (allowed)
+- Rate limiting (5s window) prevents permission prompt spam
 
 **Security Notes:**
 
@@ -536,13 +540,13 @@ Permission keys support glob patterns with `~` for home directory (e.g., `fs:rea
 
 ### Permission Request UI ⚠️
 
-**Status:** Infrastructure complete, test-mode only
+**Status:** Fully implemented
 
 - ✅ Full UI flow implemented (inline prompt, y/n input, timeout handling)
 - ✅ Channel-based blocking between core and UI
 - ✅ Policy persistence for `request_once` grants
-- ⚠️ **Only works for `mock_permission_tool`** (hardcoded in `core/loop.go:731-734`)
-- ⚠️ Real agent permission enforcement requires manifest loading during tool execution (TODO at line 732)
+- ✅ All tools evaluated against manifest rules via `ToolManifestProvider` interface
+- ✅ Rate-limited permission prompts (5s deduplication window)
 
 When `request_once` or `request_always` triggers, the prompt appears **inline in the Chat page** showing what the tool is trying to do (e.g., "code-editor wants to write to `/src/main.go` — allow?"). The manifest can declare a timeout and default value (allow/deny). If no timeout and no default, it waits forever.
 
@@ -753,6 +757,14 @@ Each provider is **independent** - no coupling between implementations. The `cor
 - Display currency configurable via `currency` in config (ISO 4217 code, default `"USD"`)
 - Exchange rate fetched once at startup from Frankfurter API and cached for the session
 - Currency wiring is handled in `app/bootstrap.go` phase 2 (`setupCurrencyFormatter`): reads `config.Currency`, fetches rate if non-USD, builds `CurrencyFormatter`, passes to `NewTracker`.
+
+### Token Estimation
+
+Token counts use a heuristic of **1.2 characters per token** (`core/loop.go:estimateTokenCount`). This is intentionally conservative — it over-reports, which is safer for context-limit tracking. When the provider API reports actual token counts (e.g., Bedrock `ConverseStream` includes `inputTokens`/`outputTokens` in its metadata), those values are used directly via the `Tracker`. The 1.2 heuristic is only a fallback for pre-send estimation (e.g., deciding when to auto-compact).
+
+### Model Info Caching
+
+Model metadata (context window size, pricing) is cached per session via `sync.Once`. This is intentional — model metadata does not change during a session. No cache invalidation or TTL is needed.
 
 ---
 

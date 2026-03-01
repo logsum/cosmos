@@ -4,6 +4,7 @@ import (
 	"cosmos/core"
 	"cosmos/ui"
 	"fmt"
+	"log"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -59,7 +60,9 @@ func (a *coreNotifierAdapter) Send(msg any) {
 	case core.CompactionFailedEvent:
 		a.ui.Send(ui.ChatCompactionFailedMsg{Error: e.Error})
 	case core.PermissionRequestEvent:
-		// Wrap the core channel in a callback so ui never imports core
+		// Wrap the core channel in a callback so ui never imports core.
+		// The recover() handles the race where core closes the channel
+		// (on timeout/cancellation) before the UI responds.
 		ch := e.ResponseChan
 		a.ui.Send(ui.ChatPermissionRequestMsg{
 			ToolCallID:   e.ToolCallID,
@@ -70,6 +73,11 @@ func (a *coreNotifierAdapter) Send(msg any) {
 			Timeout:      e.Timeout,
 			DefaultAllow: e.DefaultAllow,
 			RespondFunc: func(allowed, remember bool) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("permission response channel already closed (timeout race): %v", r)
+					}
+				}()
 				ch <- core.PermissionResponse{
 					Allowed:  allowed,
 					Remember: remember,

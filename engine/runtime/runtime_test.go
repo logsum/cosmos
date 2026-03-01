@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"cosmos/engine/manifest"
-
-	v8 "rogchap.com/v8go"
 )
 
 // testFixturePath returns the absolute path to a testdata fixture.
@@ -79,7 +77,7 @@ func TestEffectiveTimeout(t *testing.T) {
 }
 
 func TestToolRegistration(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	spec := echoSpec(t)
@@ -119,7 +117,7 @@ func TestConsoleLogDefault(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	if err := e.RegisterTool(ToolSpec{
@@ -168,7 +166,7 @@ func TestEscapeJSString(t *testing.T) {
 }
 
 func TestExecuteEcho(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	if err := e.RegisterTool(echoSpec(t)); err != nil {
@@ -198,7 +196,7 @@ func TestExecuteEcho(t *testing.T) {
 }
 
 func TestExecuteUnknown(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	_, err := e.Execute(context.Background(), "nonexistent", nil)
@@ -211,7 +209,7 @@ func TestExecuteUnknown(t *testing.T) {
 }
 
 func TestLazyLoading(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	spec := echoSpec(t)
@@ -247,7 +245,7 @@ func TestLazyLoading(t *testing.T) {
 }
 
 func TestTimeout(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	m := loadTestManifest(t, "timeout")
@@ -278,7 +276,7 @@ func TestTimeout(t *testing.T) {
 }
 
 func TestJSException(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	m := loadTestManifest(t, "error")
@@ -314,7 +312,7 @@ func TestHotReload(t *testing.T) {
 		t.Fatalf("write initial: %v", err)
 	}
 
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	spec := ToolSpec{
@@ -355,55 +353,8 @@ func TestHotReload(t *testing.T) {
 	}
 }
 
-func TestAPIInjection(t *testing.T) {
-	registry := NewAPIRegistry()
-
-	var captured string
-	registry.Register(APIBinding{
-		Namespace: "test",
-		Name:      "capture",
-		Callback: func(info *v8.FunctionCallbackInfo) *v8.Value {
-			args := info.Args()
-			if len(args) > 0 {
-				captured = args[0].String()
-			}
-			return v8.Undefined(info.Context().Isolate())
-		},
-	})
-
-	// Create a temp JS file that calls our injected API.
-	tmpDir := t.TempDir()
-	srcPath := filepath.Join(tmpDir, "index.js")
-	src := `function invoke(input) { test.capture(input.data); return { ok: true }; }`
-	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	e := NewV8Executor(registry, nil, "", nil)
-	defer e.Close()
-
-	spec := ToolSpec{
-		AgentName:    "test-agent",
-		FunctionName: "invoke",
-		SourcePath:   srcPath,
-		Manifest:     manifest.Manifest{},
-	}
-	if err := e.RegisterTool(spec); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	_, err := e.Execute(context.Background(), "invoke", map[string]any{"data": "injected!"})
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	if captured != "injected!" {
-		t.Errorf("captured = %q, want %q", captured, "injected!")
-	}
-}
-
 func TestClose(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 
 	spec := echoSpec(t)
 	if err := e.RegisterTool(spec); err != nil {
@@ -423,7 +374,7 @@ func TestClose(t *testing.T) {
 }
 
 func TestContextCancellation(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	// Use timeout fixture (infinite loop) but cancel via context.
@@ -459,7 +410,7 @@ func TestContextCancellation(t *testing.T) {
 }
 
 func TestIsolateIsolation(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	// Create two tools in separate temp files, each setting a global.

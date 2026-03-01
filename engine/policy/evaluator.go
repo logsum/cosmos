@@ -90,7 +90,12 @@ const policyFileVersion = 1
 // Evaluator checks permission requests against manifest rules and
 // per-project policy overrides.
 type Evaluator struct {
-	homeDir    string
+	// homeDir is set once by NewEvaluator and never modified afterward.
+	// Safe for concurrent reads without mutex protection.
+	homeDir string
+	// cwd is set once by NewEvaluator and never modified afterward.
+	// Used to resolve relative rule targets against absolute request paths.
+	cwd        string
 	mu         sync.Mutex
 	policyPath string
 	overrides  map[string]map[string]PolicyEntry
@@ -103,8 +108,13 @@ func NewEvaluator(policyPath string) (*Evaluator, error) {
 	if err != nil {
 		home = ""
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
 	e := &Evaluator{
 		homeDir:    home,
+		cwd:        cwd,
 		policyPath: policyPath,
 		overrides:  make(map[string]map[string]PolicyEntry),
 	}
@@ -116,8 +126,10 @@ func NewEvaluator(policyPath string) (*Evaluator, error) {
 
 // newEvaluatorForTest creates an evaluator with an explicit homeDir (for tests).
 func newEvaluatorForTest(policyPath, homeDir string) *Evaluator {
+	cwd, _ := os.Getwd()
 	e := &Evaluator{
 		homeDir:    homeDir,
+		cwd:        cwd,
 		policyPath: policyPath,
 		overrides:  make(map[string]map[string]PolicyEntry),
 	}
@@ -286,14 +298,27 @@ func (e *Evaluator) matchRule(rule, requested manifest.PermissionKey) (tier int,
 	reqTarget := filepath.Clean(expandTilde(requested.Target, e.homeDir))
 
 	// Security: Relative rules (e.g., ./src/**) should not match absolute
-	// requests (e.g., /etc/passwd). Similarly, relative requests should
+	// requests (e.g., /etc/passwd) unless the rule can be resolved relative
+	// to the current working directory. Similarly, relative requests should
 	// not escape the current directory via .. if the rule target is anchored
 	// to the current directory (no .. prefix).
 	ruleIsAbs := filepath.IsAbs(ruleTarget)
 	reqIsAbs := filepath.IsAbs(reqTarget)
 
+	// If rule is relative and request is absolute, try to resolve the rule
+	// relative to the current working directory. This allows manifest rules
+	// like fs:read:./testdata/** to match when runtime APIs canonicalize
+	// paths to absolute (e.g., /home/user/project/testdata/foo.txt).
 	if !ruleIsAbs && reqIsAbs {
-		return -1, 0
+		if e.cwd != "" {
+			absRuleTarget := filepath.Clean(filepath.Join(e.cwd, ruleTarget))
+			// Continue matching with the resolved absolute path.
+			ruleTarget = absRuleTarget
+			ruleIsAbs = true
+		} else {
+			// Could not determine cwd — reject match for security.
+			return -1, 0
+		}
 	}
 	if !ruleIsAbs && !reqIsAbs {
 		ruleEscapes := strings.HasPrefix(ruleTarget, "..")

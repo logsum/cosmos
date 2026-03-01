@@ -28,6 +28,10 @@ type Config struct {
 	// this controls the display currency with conversion via Frankfurter API.
 	Currency string `toml:"currency"`
 
+	// Permission timeout (seconds). How long to wait for user response to
+	// permission prompts before applying the default decision.
+	PermissionTimeout int `toml:"permission_timeout"`
+
 	// Project-local paths — not TOML-configurable.
 	// These are intentionally relative (to the project working directory).
 	// They will be anchored to a discovered project root once that mechanism
@@ -53,9 +57,10 @@ func DefaultConfig() Config {
 		SessionsDir:     filepath.Join(cosmosDir, "sessions"),
 		AgentsDir:       filepath.Join(cosmosDir, "agents"),
 		PricingCacheDir: filepath.Join(cosmosDir, "cache", "pricing"),
-		PricingCacheTTL: 168, // 1 week in hours
-		PricingEnabled:  true,
-		Currency:        "USD",
+		PricingCacheTTL:   168, // 1 week in hours
+		PricingEnabled:    true,
+		Currency:          "USD",
+		PermissionTimeout: 30, // seconds
 		// AuditFile documents the pattern - actual files are per-session: audit-<session-id>.jsonl
 		AuditFile:       filepath.Join(".cosmos", "audit-{session-id}.jsonl"),
 		PolicyFile:      filepath.Join(".cosmos", "policy.json"),

@@ -78,9 +78,16 @@ func Bootstrap(ctx context.Context) (*Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initializing session: %w", err)
 	}
+	// From here, failures must clean up the executor (V8 isolates).
+	cleanup := func() {
+		if executor != nil {
+			executor.Close()
+		}
+	}
 
 	// 7. Configure UI pages
 	if err := configureUI(scaffold, session, tools, cfg.DefaultModel); err != nil {
+		cleanup()
 		return nil, fmt.Errorf("configuring UI: %w", err)
 	}
 
@@ -111,19 +118,34 @@ func loadConfig() (config.Config, []string, error) {
 }
 
 // setupCurrencyFormatter initializes currency conversion if needed.
+// Retries up to 3 times with exponential backoff (1s, 2s, 4s) before
+// returning an error that triggers fallback to USD.
 func setupCurrencyFormatter(ctx context.Context, cfg config.Config) (*core.CurrencyFormatter, error) {
 	if cfg.Currency == "USD" {
 		return core.DefaultCurrencyFormatter(), nil
 	}
 
 	engine := core.NewCurrencyEngine(&http.Client{})
-	rate, err := engine.FetchRate(ctx, "USD", cfg.Currency)
-	if err != nil {
-		return nil, err
+
+	var lastErr error
+	for attempt := range 3 {
+		rate, err := engine.FetchRate(ctx, "USD", cfg.Currency)
+		if err == nil {
+			symbol := core.CurrencySymbol(cfg.Currency)
+			return core.NewCurrencyFormatter(cfg.Currency, symbol, rate), nil
+		}
+		lastErr = err
+
+		// Exponential backoff: 1s, 2s, 4s
+		backoff := time.Duration(1<<attempt) * time.Second
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return nil, fmt.Errorf("currency fetch cancelled: %w", ctx.Err())
+		}
 	}
 
-	symbol := core.CurrencySymbol(cfg.Currency)
-	return core.NewCurrencyFormatter(cfg.Currency, symbol, rate), nil
+	return nil, fmt.Errorf("currency fetch failed after 3 attempts: %w", lastErr)
 }
 
 // setupProvider initializes the LLM provider (currently Bedrock).
@@ -207,6 +229,11 @@ func setupSession(
 		auditLogger,
 		evaluator,
 	)
+
+	// Wire configurable permission timeout if set.
+	if cfg.PermissionTimeout > 0 {
+		session.SetPermissionTimeout(time.Duration(cfg.PermissionTimeout) * time.Second)
+	}
 
 	return session, result.Tools, result.Executor, nil
 }

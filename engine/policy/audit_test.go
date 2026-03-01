@@ -345,6 +345,23 @@ func TestRedactSensitiveData(t *testing.T) {
 			},
 		},
 		{
+			name: "value-based redaction",
+			input: map[string]any{
+				"data":    "my_secret_token_abc123",
+				"x":       "password123",
+				"payload": "Bearer auth_header value",
+				"safe":    "nothing-sensitive-here",
+				"number":  42,
+			},
+			expected: map[string]any{
+				"data":    "[REDACTED]",
+				"x":       "[REDACTED]",
+				"payload": "[REDACTED]",
+				"safe":    "nothing-sensitive-here",
+				"number":  42,
+			},
+		},
+		{
 			name: "deeply nested structure",
 			input: map[string]any{
 				"level1": map[string]any{

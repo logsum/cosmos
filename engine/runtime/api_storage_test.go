@@ -21,7 +21,7 @@ func TestStorageGetSet(t *testing.T) {
 	toolCtx := testToolContext(t, "storage-agent", permissions)
 	toolCtx.StorageDir = storageDir
 
-	e := NewV8Executor(nil, toolCtx.Evaluator, storageDir, nil)
+	e := NewV8Executor(toolCtx.Evaluator, storageDir, nil)
 	defer e.Close()
 
 	tmpDir := t.TempDir()
@@ -96,7 +96,7 @@ func TestStorageGet_Missing(t *testing.T) {
 	toolCtx := testToolContext(t, "storage-agent", permissions)
 	toolCtx.StorageDir = storageDir
 
-	e := NewV8Executor(nil, toolCtx.Evaluator, storageDir, nil)
+	e := NewV8Executor(toolCtx.Evaluator, storageDir, nil)
 	defer e.Close()
 
 	tmpDir := t.TempDir()
@@ -138,7 +138,7 @@ func TestStorage_PermissionDenied(t *testing.T) {
 	toolCtx := testToolContext(t, "storage-agent", permissions)
 	toolCtx.StorageDir = storageDir
 
-	e := NewV8Executor(nil, toolCtx.Evaluator, storageDir, nil)
+	e := NewV8Executor(toolCtx.Evaluator, storageDir, nil)
 	defer e.Close()
 
 	tmpDir := t.TempDir()

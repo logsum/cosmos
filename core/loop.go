@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -31,6 +32,11 @@ const (
 	// defaultPermissionTimeout is the default timeout for permission requests.
 	// TODO: Make this configurable per manifest when V8 lands.
 	defaultPermissionTimeout = 30 * time.Second
+
+	// permissionRateLimitWindow is the minimum interval between identical
+	// permission prompts. If the same permission key is prompted again within
+	// this window, the request is denied without prompting.
+	permissionRateLimitWindow = 5 * time.Second
 
 	// compactionPromptTemplate is the prompt sent to the LLM for summarization.
 	compactionPromptTemplate = `You are tasked with summarizing a coding conversation to reduce token usage while preserving all critical information.
@@ -58,6 +64,13 @@ Write the summary in markdown format. Be extremely concise.`
 // ToolExecutor runs a tool and returns its result.
 type ToolExecutor interface {
 	Execute(ctx context.Context, name string, input map[string]any) (string, error)
+}
+
+// ToolManifestProvider is an optional interface that ToolExecutor implementations
+// can satisfy to expose manifest permission rules for each tool. This allows the
+// core loop to evaluate permissions without importing engine packages directly.
+type ToolManifestProvider interface {
+	ToolPermissionRules(name string) (agentName string, rules []manifest.PermissionRule, ok bool)
 }
 
 // Session manages a single LLM conversation loop.
@@ -100,12 +113,23 @@ type Session struct {
 	modelInfoOnce   sync.Once
 
 	warned50 bool // Track if 50% context warning already sent (reset after compaction)
+
+	// recentPrompts tracks the last time each permission key was prompted.
+	// Used for rate-limiting permission prompts (5s window).
+	// Accessed only from the single-threaded loop goroutine — no mutex needed.
+	recentPrompts map[string]time.Time
 }
 
 // Notifier interface for UI updates. The Send method accepts any event type;
 // the adapter in main.go translates core events into framework-specific messages.
 type Notifier interface {
 	Send(msg any)
+}
+
+// SetPermissionTimeout configures the timeout for permission prompts.
+// Must be called before Start(). Zero uses the default (30s).
+func (s *Session) SetPermissionTimeout(d time.Duration) {
+	s.permissionTimeout = d
 }
 
 // NewSession creates a new conversation session
@@ -123,20 +147,21 @@ func NewSession(
 	evaluator *policy.Evaluator,
 ) *Session {
 	return &Session{
-		provider:    prov,
-		tracker:     tracker,
-		notifier:    notifier,
-		model:       model,
-		systemMsg:   systemMsg,
-		maxTokens:   maxTokens,
-		executor:    executor,
-		tools:       tools,
-		id:          sessionID,
-		auditLogger: auditLogger,
-		evaluator:   evaluator,
-		history:     []provider.Message{},
-		userMsgChan: make(chan string, 16), // Buffered for responsiveness
-		stopChan:    make(chan struct{}),
+		provider:      prov,
+		tracker:       tracker,
+		notifier:      notifier,
+		model:         model,
+		systemMsg:     systemMsg,
+		maxTokens:     maxTokens,
+		executor:      executor,
+		tools:         tools,
+		id:            sessionID,
+		auditLogger:   auditLogger,
+		evaluator:     evaluator,
+		history:       []provider.Message{},
+		userMsgChan:   make(chan string, 16), // Buffered for responsiveness
+		stopChan:      make(chan struct{}),
+		recentPrompts: make(map[string]time.Time),
 	}
 }
 
@@ -179,8 +204,10 @@ func (s *Session) loop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			s.drainPendingMessages()
 			return
 		case <-s.stopChan:
+			s.drainPendingMessages()
 			return
 		case userText := <-s.userMsgChan:
 			s.wg.Add(1)
@@ -189,6 +216,19 @@ func (s *Session) loop(ctx context.Context) {
 				s.notifier.Send(ErrorEvent{Error: err.Error()})
 			}
 			s.wg.Done()
+		}
+	}
+}
+
+// drainPendingMessages reads and logs any messages left in userMsgChan
+// during shutdown so they are not silently lost.
+func (s *Session) drainPendingMessages() {
+	for {
+		select {
+		case userText := <-s.userMsgChan:
+			log.Printf("session: dropping pending message during shutdown: %q", userText)
+		default:
+			return
 		}
 	}
 }
@@ -603,7 +643,8 @@ func (s *Session) generateSummary(ctx context.Context) (string, error) {
 		preserveCount = 0 // No point summarizing if all would be preserved
 	}
 
-	historyToSummarize := s.history[:len(s.history)-preserveCount]
+	historyToSummarize := make([]provider.Message, len(s.history)-preserveCount)
+	copy(historyToSummarize, s.history[:len(s.history)-preserveCount])
 	s.mu.Unlock()
 
 	// Build conversation text for summarization
@@ -719,111 +760,131 @@ type permissionDecision struct {
 //     * Timeout (defaultPermissionTimeout) prevents indefinite blocking.
 //   - s.evaluator.Evaluate() is internally thread-safe (sync.Mutex).
 //   - s.evaluator.RecordOnceDecision() writes to policy.json (synchronized internally).
-func (s *Session) checkPermission(ctx context.Context, toolCallID, toolName string, input map[string]any) permissionDecision {
+func (s *Session) checkPermission(ctx context.Context, toolCallID, toolName string, _ map[string]any) permissionDecision {
 	// If no evaluator configured, allow all tools (stub mode)
 	if s.evaluator == nil {
 		return permissionDecision{allowed: true}
 	}
 
-	// For now, only mock_permission_tool has explicit permission rules (for testing).
-	// Real implementation will load manifest rules from disk when V8 lands.
-	// Pre-V8 stub tools without manifest rules are allowed by default.
-	if toolName != "mock_permission_tool" {
-		// TODO(Phase 3 - V8): Load manifest for this tool and evaluate permissions
+	// Look up the tool's manifest rules via the executor.
+	// If the executor doesn't implement ToolManifestProvider (e.g., stub),
+	// fall through to default-deny.
+	var agentName string
+	var rules []manifest.PermissionRule
+	if mp, ok := s.executor.(ToolManifestProvider); ok {
+		var found bool
+		agentName, rules, found = mp.ToolPermissionRules(toolName)
+		if !found {
+			// Tool not registered — deny.
+			return permissionDecision{allowed: false, reason: fmt.Sprintf("tool %s not found in manifest registry", toolName)}
+		}
+	} else {
+		// Executor doesn't support manifest lookup — default deny.
+		return permissionDecision{allowed: false, reason: "executor does not provide manifest rules"}
+	}
+
+	// If the tool declares no permissions, it's a pure function — allow.
+	if len(rules) == 0 {
 		return permissionDecision{allowed: true}
 	}
 
-	// Test permission check for mock_permission_tool
-	// Simulates: "fs:write:./test.txt": "request_once"
-	permKey, err := manifest.ParsePermissionKey("fs:write:./test.txt")
-	if err != nil {
-		return permissionDecision{allowed: false, reason: "invalid permission key"}
-	}
-
-	// Hard-coded test rule for mock_permission_tool
-	testRules := []manifest.PermissionRule{
-		{
-			Key:  permKey,
-			Mode: manifest.PermissionRequestOnce,
-		},
-	}
-
-	decision := s.evaluator.Evaluate("test-agent", permKey, testRules)
-
-	// Handle prompt effects
-	if decision.Effect == policy.EffectPromptOnce || decision.Effect == policy.EffectPromptAlways {
-		// Create response channel and emit request event
-		responseChan := make(chan PermissionResponse, 1)
-		defaultAllow := false // Will be per-manifest when V8 lands
-
-		timeout := s.permissionTimeout
-		if timeout == 0 {
-			timeout = defaultPermissionTimeout
+	// Pre-check: only act on rules that require user prompting.
+	// allow/deny rules are evaluated at runtime against concrete paths
+	// (in engine/runtime/api_helpers.go) — we skip them here because we
+	// don't know which specific files/URLs the tool will access yet.
+	for _, rule := range rules {
+		if rule.Mode != manifest.PermissionRequestOnce &&
+			rule.Mode != manifest.PermissionRequestAlways {
+			continue
 		}
 
-		s.notifier.Send(PermissionRequestEvent{
-			ToolCallID:   toolCallID,
-			ToolName:     toolName,
-			AgentName:    "test-agent",
-			Permission:   "fs:write:./test.txt",
-			Description:  fmt.Sprintf("%s wants to write to ./test.txt", toolName),
-			Timeout:      timeout,
-			DefaultAllow: defaultAllow,
-			ResponseChan: responseChan,
-		})
+		decision := s.evaluator.Evaluate(agentName, rule.Key, rules)
 
-		// Block waiting for user response (with timeout).
-		// Core owns the timeout — the UI does not run its own timer.
-		select {
-		case response := <-responseChan:
-			if response.Allowed {
-				// Record decision for request_once
-				if decision.Effect == policy.EffectPromptOnce {
-					if err := s.evaluator.RecordOnceDecision("test-agent", permKey.Raw, true); err != nil {
-						s.notifier.Send(ErrorEvent{
-							Error: fmt.Sprintf("Warning: Failed to persist permission grant: %v. You may be prompted again.", err),
-						})
-					}
-				}
-				return permissionDecision{allowed: true}
+		switch decision.Effect {
+		case policy.EffectAllow:
+			continue // already granted (persisted grant or policy override)
+		case policy.EffectDeny:
+			// explicitly denied — fail early rather than V8 runtime denial mid-execution
+			return permissionDecision{allowed: false, reason: fmt.Sprintf("permission denied: %s", rule.Key.Raw)}
+		case policy.EffectPromptOnce, policy.EffectPromptAlways:
+			pd := s.handlePermissionPrompt(ctx, toolCallID, toolName, agentName, rule, decision)
+			if !pd.allowed {
+				return pd
 			}
-			// User denied
+		}
+	}
+	return permissionDecision{allowed: true}
+}
+
+// handlePermissionPrompt emits a permission request to the UI and blocks until
+// the user responds, timeout expires, or context is cancelled.
+func (s *Session) handlePermissionPrompt(
+	ctx context.Context,
+	toolCallID, toolName, agentName string,
+	rule manifest.PermissionRule,
+	decision policy.Decision,
+) permissionDecision {
+	// Rate limit: deny if the same permission was prompted within the window.
+	promptKey := fmt.Sprintf("%s:%s", toolName, rule.Key.Raw)
+	if lastPrompt, ok := s.recentPrompts[promptKey]; ok && time.Since(lastPrompt) < permissionRateLimitWindow {
+		return permissionDecision{allowed: false, reason: "permission prompt rate-limited"}
+	}
+	s.recentPrompts[promptKey] = time.Now()
+
+	responseChan := make(chan PermissionResponse, 1)
+	defer close(responseChan)
+	defaultAllow := false
+
+	timeout := s.permissionTimeout
+	if timeout == 0 {
+		timeout = defaultPermissionTimeout
+	}
+
+	s.notifier.Send(PermissionRequestEvent{
+		ToolCallID:   toolCallID,
+		ToolName:     toolName,
+		AgentName:    agentName,
+		Permission:   rule.Key.Raw,
+		Description:  fmt.Sprintf("%s wants %s", toolName, rule.Key.Raw),
+		Timeout:      timeout,
+		DefaultAllow: defaultAllow,
+		ResponseChan: responseChan,
+	})
+
+	select {
+	case response := <-responseChan:
+		if response.Allowed {
 			if decision.Effect == policy.EffectPromptOnce {
-				if err := s.evaluator.RecordOnceDecision("test-agent", permKey.Raw, false); err != nil {
+				if err := s.evaluator.RecordOnceDecision(agentName, rule.Key.Raw, true); err != nil {
 					s.notifier.Send(ErrorEvent{
-						Error: fmt.Sprintf("Warning: Failed to persist permission denial: %v. You may be prompted again.", err),
+						Error: fmt.Sprintf("Warning: Failed to persist permission grant: %v. You may be prompted again.", err),
 					})
 				}
 			}
-			return permissionDecision{allowed: false, reason: "user denied permission"}
-
-		case <-time.After(timeout):
-			// Timeout — notify UI so it can mark the prompt as resolved, then apply default
-			s.notifier.Send(PermissionTimeoutEvent{
-				ToolCallID: toolCallID,
-				Allowed:    defaultAllow,
-			})
-			if defaultAllow {
-				return permissionDecision{allowed: true}
+			return permissionDecision{allowed: true}
+		}
+		if decision.Effect == policy.EffectPromptOnce {
+			if err := s.evaluator.RecordOnceDecision(agentName, rule.Key.Raw, false); err != nil {
+				s.notifier.Send(ErrorEvent{
+					Error: fmt.Sprintf("Warning: Failed to persist permission denial: %v. You may be prompted again.", err),
+				})
 			}
-			return permissionDecision{allowed: false, reason: "permission request timed out"}
-
-		case <-ctx.Done():
-			return permissionDecision{allowed: false, reason: "operation cancelled"}
 		}
-	}
+		return permissionDecision{allowed: false, reason: "user denied permission"}
 
-	// EffectAllow or EffectDeny - no prompt needed
-	if decision.Effect == policy.EffectDeny || decision.Effect == policy.EffectAllow {
-		allowed := decision.Effect == policy.EffectAllow
-		if !allowed {
-			return permissionDecision{allowed: false, reason: "permission denied by policy"}
+	case <-time.After(timeout):
+		s.notifier.Send(PermissionTimeoutEvent{
+			ToolCallID: toolCallID,
+			Allowed:    defaultAllow,
+		})
+		if defaultAllow {
+			return permissionDecision{allowed: true}
 		}
-		return permissionDecision{allowed: true}
-	}
+		return permissionDecision{allowed: false, reason: "permission request timed out"}
 
-	// Default: deny (shouldn't reach here)
-	return permissionDecision{allowed: false, reason: "unknown permission effect"}
+	case <-ctx.Done():
+		return permissionDecision{allowed: false, reason: "operation cancelled"}
+	}
 }
 
 // estimateTokenCount estimates token count using character heuristic.

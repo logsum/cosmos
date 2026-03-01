@@ -171,7 +171,11 @@ func doHTTPRequest(method, rawURL, body string, headers map[string]string, ctx *
 			if err := validateURL(target, ctx.AllowLoopback); err != nil {
 				return fmt.Errorf("redirect to %s blocked: %w", target, err)
 			}
-			if err := checkPermission(ctx, "net:http:"+target); err != nil {
+			// Check redirect-specific permission using the target's host.
+			// Manifests must declare "net:redirect:<host>": "allow" (or broad
+			// "net:redirect": "allow") to permit following redirects to that domain.
+			host := req.URL.Hostname()
+			if err := checkPermission(ctx, "net:redirect:"+host); err != nil {
 				return fmt.Errorf("redirect to %s blocked: %w", target, err)
 			}
 			return nil

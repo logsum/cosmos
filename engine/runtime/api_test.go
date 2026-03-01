@@ -144,7 +144,7 @@ func TestUIEmit(t *testing.T) {
 		capturedMsg = message
 	}
 
-	e := NewV8Executor(nil, nil, "", uiEmit)
+	e := NewV8Executor(nil, "", uiEmit)
 	defer e.Close()
 
 	tmpDir := t.TempDir()
@@ -174,7 +174,7 @@ func TestUIEmit(t *testing.T) {
 }
 
 func TestUIEmit_NilCallback(t *testing.T) {
-	e := NewV8Executor(nil, nil, "", nil)
+	e := NewV8Executor(nil, "", nil)
 	defer e.Close()
 
 	tmpDir := t.TempDir()
