@@ -143,7 +143,7 @@ The permission layer that governs what tools can do.
 - [x] Accept/deny input from user (App-level y/n routing when `permissionPending`)
 - [x] Timeout handling: core-owned single timer, emits `PermissionTimeoutEvent`, honors `DefaultAllow`
 - [x] Route decision back to policy evaluator via `RecordOnceDecision()`
-- [ ] Wire to real manifest rules (currently hardcoded for `mock_permission_tool` only)
+- [ ] Wire to real manifest rules for all agents (currently hardcoded for `mock_permission_tool` only at `core/loop.go:731-734`, TODO at line 732)
 
 ---
 
@@ -189,7 +189,8 @@ Every API call goes through the policy evaluator before executing.
 - [x] Agent name sanitization in storage path
 
 ### 3.4 Tool Dispatch Integration
-- [ ] Core loop calls `engine.Execute(agentName, functionName, args)` on tool_use
+- [x] Core loop calls `engine.Execute(agentName, functionName, args)` on tool_use
+- [ ] Wire to real manifest permission checks for all agents (currently stub mode except `mock_permission_tool`, TODO at `core/loop.go:732`)
 - [ ] Engine checks policy → runs in V8 → returns result or error
 - [ ] Concurrent read-only tools; sequential write tools (derived from permissions)
 - [ ] Return structured result to core loop for LLM consumption

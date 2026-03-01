@@ -67,23 +67,31 @@ cosmos/
 │       └── pricing_test.go    # Pricing tests
 │
 ├── engine/                    # V8 execution runtime
-│   ├── tools/                 # Tool execution layer (stub implementation)
-│   │   └── stub.go            # Temporary executor with canned responses
-│   ├── runtime.go             # V8 isolate management, Go-side API injection (planned)
-│   ├── loader.go              # Discover, validate, and load agents from disk (planned)
-│   ├── manifest/              # (planned)
-│   │   ├── schema.go          # Manifest parsing & validation
+│   ├── tools/                 # [DEPRECATED] Stub implementation
+│   │   └── stub.go            # Temporary executor replaced by V8 runtime
+│   ├── runtime/               # ✅ V8 isolate management, Go-side APIs
+│   │   ├── runtime.go         # V8Executor implementation
+│   │   ├── api_fs.go          # Filesystem APIs (read, write, list, stat, unlink)
+│   │   ├── api_http.go        # HTTP client APIs (get, post)
+│   │   ├── api_storage.go     # KV storage APIs (get, set)
+│   │   ├── api_ui.go          # UI emit API
+│   │   └── runtime_test.go    # V8 runtime tests
+│   ├── loader/                # ✅ Agent discovery and loading
+│   │   ├── loader.go          # Loads from builtin/user directories
+│   │   └── loader_test.go
+│   ├── manifest/              # ✅ Manifest parsing & validation
+│   │   ├── schema.go          # Manifest parsing, Ed25519 signing
 │   │   └── manifest_test.go
-│   ├── policy/                # (planned)
+│   ├── policy/                # ✅ Permission enforcement & audit
 │   │   ├── evaluator.go       # Permission checks (allow/deny/request_once/request_always)
 │   │   ├── audit.go           # JSON-lines audit logging with redaction
 │   │   └── policy_test.go
-│   └── agents/                # Bundled default agents (planned)
-│       └── <agent-name>/
-│           ├── index.js
-│           └── cosmo.manifest.json
+│   ├── maintenance/           # ✅ Session cleanup
+│   │   └── cleanup.go         # Delete old session data (30 days)
+│   └── agents/                # Bundled default agents (loader ready, directory empty)
+│       └── [no agents bundled yet]
 │
-└── config/                    # Global defaults (planned)
+└── config/                    # ✅ Global defaults
     └── defaults.go
 ```
 
@@ -389,63 +397,93 @@ If duplicates or missing lines appear in scrollback:
 
 ## V8 Engine (`engine/`)
 
-### Tool Execution Layer (`engine/tools/`)
+### V8 Runtime (`engine/runtime/`) ✅
 
-The `engine/tools` package provides the tool execution abstraction. Currently contains a **stub implementation** that will be replaced when V8 runtime lands.
+**Status:** Fully implemented with `rogchap.com/v8go`
 
-**Current: Stub Executor (`stub.go`)**
+The V8 runtime provides true sandboxed JavaScript execution for tools. Each tool runs in its own V8 isolate with zero direct host access.
 
-- `StubExecutor` - Temporary implementation returning canned responses
-  - `get_weather` - Returns mock JSON weather data
-  - `read_file` - Simulates permission error after 5s delay
-- `StubToolDefinitions()` - Returns hardcoded tool definitions
+**Implementation Features:**
 
-This stub exists solely to:
-- Exercise the tool-use loop end-to-end during development
-- Test the `core/loop.go` orchestration without V8 dependencies
-- Provide working tools for UI/UX development
+- ✅ **One isolate per tool** - True sandboxing. A misbehaving tool cannot corrupt another tool's heap
+- ✅ **Lazy loading** - Tools are compiled into V8 on first execution, not at startup
+- ✅ **Hot reload** - Stat-on-use: checks file modification time and recompiles if JS changed
+- ✅ **Timeout enforcement** - Per-manifest timeout, clamped to 5-minute global maximum
+- ✅ **Error capture** - JavaScript exceptions converted to Go errors with stack traces
+- ✅ **Context cancellation** - Respects `context.Context` for clean shutdown
+- ✅ **Function validation** - JS identifier check prevents script injection attacks
 
-**Future: Real Executor (when V8 lands)**
-
-The real tool executor will:
-- Load tools from disk (`engine/agents/*/index.js` and `~/.cosmos/agents/`)
-- Execute tools in V8 isolates (one isolate per tool for isolation)
-- Enforce permissions via manifest (`engine/policy/evaluator.go`)
-- Log all executions to audit trail (`engine/policy/audit.go`)
-- Support hot reload when JS files change
-- Apply per-tool timeouts from manifest
-
-The `ToolExecutor` interface is defined in `core/loop.go`:
+**V8Executor Interface** (implemented in `engine/runtime/runtime.go`):
 
 ```go
-type ToolExecutor interface {
-    Execute(ctx context.Context, name string, input map[string]any) (string, error)
+type V8Executor struct {
+    isolates   map[string]*isolateState  // Per-tool V8 isolate
+    apiRegistry APIRegistry               // Go-side APIs injected into V8
+    mu         sync.Mutex                 // Protects isolates map
 }
+
+func (e *V8Executor) Execute(ctx context.Context, name string, input map[string]any) (string, error)
+func (e *V8Executor) RegisterTool(spec ToolSpec) error
 ```
 
-This interface decouples core orchestration from execution mechanism, making it easy to swap stub → V8 implementation without touching core logic.
+**Stub Executor (Deprecated):**
 
-### Runtime Design (planned)
+The `engine/tools/stub.go` package contains a legacy stub implementation used during early development. It is **replaced** by the V8 runtime but remains in the codebase for backward compatibility during testing.
 
-- **Binding**: `rogchap.com/v8go` — real V8, cgo-based, chosen for full isolation and performance
-- **Isolation**: One V8 isolate per tool. Truly sandboxed — a misbehaving tool cannot corrupt another tool's heap
-- **Loading**: Lazy. Tools are loaded into V8 on first invocation, not at startup
-- **Hot reload**: When a `.js` file changes on disk, the tool is reloaded automatically
-- **Timeout**: Per-tool timeout declared in manifest. Global maximum of 5 minutes enforced regardless
+### Agent Loading (`engine/loader/`) ✅
 
-### APIs Injected into V8
+**Status:** Fully implemented
+
+The loader discovers and loads agents from disk:
+
+1. **Built-in agents**: `engine/agents/*/cosmo.manifest.json` (directory exists but no agents bundled yet)
+2. **User agents**: `~/.cosmos/agents/*/cosmo.manifest.json`
+3. **Conflict resolution**: User version wins on name conflict
+4. **Validation**: Manifests parsed and validated on load
+5. **Tool registration**: Registers tools with V8Executor
+6. **ToolDefinition generation**: Converts manifests to LLM-compatible schemas
+
+**Key Functions:**
+
+```go
+func Load(builtinDir, userDir string, executor *V8Executor) ([]ToolDefinition, []AgentInfo, []error)
+```
+
+- Non-fatal errors collected (invalid agents logged but don't halt)
+- Path traversal protection on entry file resolution
+- Agent name sanitization for storage paths
+
+### APIs Injected into V8 ✅
+
+**Status:** Fully implemented (except `docker.*`)
 
 Tools have zero direct host access. All capabilities come from Go-side APIs injected into the V8 context:
 
-| API | Description | Notes |
-|---|---|---|
-| `fs.*` | VFS — read, write, list, stat, unlink | Scoped per-tool via glob patterns in manifest. The VFS layer snapshots files before writes (for changelog restore). |
-| `http.*` | HTTP client | Future: SSH, SQL connectors |
-| `storage.*` | Persistent key-value store | Scoped per-tool, like localStorage |
-| `ui.emit()` | Send messages to the chat window | For progress updates, user prompts |
-| `docker.*` | Docker API for build/run | Used by build agents. No direct host process execution — this is a core security goal |
+| API | Status | Description | Implementation |
+|---|---|---|---|
+| `fs.read(path)` | ✅ | Read file contents | `api_fs.go` - Permission checked, symlinks resolved, 50 MB size limit recommended |
+| `fs.write(path, content)` | ✅ | Write file contents | `api_fs.go` - Permission checked, parent dirs created (0700), overwrites existing |
+| `fs.list(path)` | ✅ | List directory contents | `api_fs.go` - Returns array of filenames |
+| `fs.stat(path)` | ✅ | Get file metadata | `api_fs.go` - Returns size, modTime, isDir |
+| `fs.unlink(path)` | ✅ | Delete file | `api_fs.go` - Permission checked |
+| `http.get(url, headers)` | ✅ | HTTP GET request | `api_http.go` - 10 MB response limit, 30s timeout |
+| `http.post(url, body, headers)` | ✅ | HTTP POST request | `api_http.go` - 10 MB response limit, 30s timeout |
+| `storage.get(key)` | ✅ | Get from KV store | `api_storage.go` - Per-agent JSON file storage |
+| `storage.set(key, value)` | ✅ | Set in KV store | `api_storage.go` - Atomic read-modify-write |
+| `ui.emit(message)` | ✅ | Send to chat window | `api_ui.go` - Progress updates, no permission check |
+| `docker.*` | ⚠️ Planned | Docker build/run | For build agents |
 
-**Explicitly excluded**: No shell/process execution on the host. Build operations go through Docker via a dedicated agent. No inter-tool communication.
+**Permission Integration:**
+
+- ⚠️ **Currently limited**: Only `mock_permission_tool` triggers real permission checks
+- All other tools bypass permission enforcement (development mode)
+- **TODO**: Wire manifest permission loading during tool execution (`core/loop.go:732`)
+
+**Security Notes:**
+
+- ✅ No shell/process execution on host
+- ✅ No inter-tool communication
+- ⚠️ Build operations will go through Docker (planned)
 
 ### Concurrency
 
@@ -496,7 +534,15 @@ Read-only tools can run concurrently. Write tools run sequentially. This is deri
 
 Permission keys support glob patterns with `~` for home directory (e.g., `fs:read:~/Documents/**`).
 
-### Permission Request UI
+### Permission Request UI ⚠️
+
+**Status:** Infrastructure complete, test-mode only
+
+- ✅ Full UI flow implemented (inline prompt, y/n input, timeout handling)
+- ✅ Channel-based blocking between core and UI
+- ✅ Policy persistence for `request_once` grants
+- ⚠️ **Only works for `mock_permission_tool`** (hardcoded in `core/loop.go:731-734`)
+- ⚠️ Real agent permission enforcement requires manifest loading during tool execution (TODO at line 732)
 
 When `request_once` or `request_always` triggers, the prompt appears **inline in the Chat page** showing what the tool is trying to do (e.g., "code-editor wants to write to `/src/main.go` — allow?"). The manifest can declare a timeout and default value (allow/deny). If no timeout and no default, it waits forever.
 
@@ -515,23 +561,48 @@ Manifests include an Ed25519 signature for permission declarations. Signing uses
 
 ---
 
-## Policy Engine (`engine/policy/`)
+## Policy Engine (`engine/policy/`) ✅
+
+**Status:** Fully implemented with effect types, glob matching, and audit logging
 
 ### Evaluation Rules
 
-1. Check manifest for the requested permission
-2. If declared: evaluate the mode (allow/deny/request)
-3. If **not declared**: deny and log (default-deny policy)
-4. No global user overrides — per-project `.cosmos/policy.json` can override manifest defaults for team enforcement
-5. `request_once` grants are scoped per project (persisted to `.cosmos/policy.json`)
+The policy evaluator (`evaluator.go`) implements a sophisticated permission system:
 
-### Audit Log
+1. ✅ Check manifest for the requested permission
+2. ✅ If declared: evaluate the mode (allow/deny/request_once/request_always)
+3. ✅ If **not declared**: deny and log (default-deny policy)
+4. ✅ Per-project overrides from `.cosmos/policy.json` take absolute precedence
+5. ✅ `request_once` grants scoped per project, persisted to `.cosmos/policy.json`
+6. ✅ Glob pattern matching via `doublestar/v4` with specificity-based rule selection
+7. ✅ Thread-safe with `sync.Mutex`
 
-- **Format**: JSON lines (one JSON object per line), grep-friendly
-- **Location**: `.cosmos/audit.jsonl` in the project directory
-- **Fields**: timestamp, agent, tool, permission, decision (allowed/denied/user-approved/user-denied), arguments (redacted for sensitive data)
-- **Retention**: Rotate every 30 days or 10 MB, whichever comes first
-- **UI**: The Agents page History view reads directly from this file
+**Effect Types:**
+
+- `EffectAllow` - Grant silently
+- `EffectDeny` - Block silently
+- `EffectPromptOnce` - Prompt user, remember decision
+- `EffectPromptAlways` - Prompt every time
+
+**Decision Source Tracking:**
+
+Every evaluation returns the source of the decision:
+- `manifest` - From agent's cosmo.manifest.json
+- `policy_override` - From .cosmos/policy.json team override
+- `persisted_grant` - From prior `request_once` user approval
+- `default_deny` - No matching rule found
+
+### Audit Log ✅
+
+**Status:** Fully implemented with session-scoped logging
+
+- ✅ **Format**: JSON lines (one JSON object per line), grep-friendly
+- ✅ **Location**: `.cosmos/audit-{sessionID}.jsonl` per session
+- ✅ **Fields**: timestamp, sessionID, agent, tool, permission, decision, decisionSource, arguments
+- ✅ **Redaction**: Automatically redacts keys containing "token", "key", "password", "secret", "credential", "auth"
+- ✅ **Cleanup**: Session-based cleanup via `engine/maintenance` package (deletes after 30 days)
+- ✅ **Thread-safe**: Single-threaded writes, no concurrent audit operations
+- ⚠️ **UI Integration**: Agents page History view designed but currently shows mock data
 
 ### Permission Request UI Flow
 
@@ -649,12 +720,27 @@ Each provider is **independent** - no coupling between implementations. The `cor
 
 ---
 
-## Session Management (`core/session.go`)
+## Session Management (`core/session.go`) ⚠️
 
-- Stored at `~/.cosmos/sessions/`
+**Status:** Lifecycle managed, persistence not implemented
+
+**Current Implementation:**
+
+- ✅ Session creation with UUID (`NewSession`)
+- ✅ Message history tracking
+- ✅ Start/Stop lifecycle methods with goroutine-based message loop
+- ✅ Cleanup of old session data (30 days) via `engine/maintenance` package
+- ✅ Session ID used in audit logs and file paths
+- ❌ **No save-to-disk implementation**
+- ❌ **No session restore functionality**
+- ❌ **`/restore` command not implemented**
+
+**Planned Design:**
+
+- Storage location: `~/.cosmos/sessions/`
 - Filename format: `<project-path-dotted>-<timestamp>.json` (e.g., `home.gmilani.myproject-20260222T103000.json`)
-- Each session tracks: messages, token usage, cost, agents invoked, files modified
-- Session description: the user's last prompt
+- Each session will track: messages, token usage, cost, agents invoked, files modified
+- Session description: user's last prompt
 - `/restore <session>` with tab-autocomplete to resume past sessions
 
 ---
@@ -672,22 +758,42 @@ Each provider is **independent** - no coupling between implementations. The `cor
 
 ## Chat Page Rendering
 
-Future enhancements (decided, not yet implemented):
+**Current Implementation:**
 
-- **Markdown rendering** in assistant messages via `glamour`
-- **Syntax highlighting** in code blocks via `chroma` (github.com/alecthomas/chroma)
-- **Inline diffs** when agents modify files: `+`/`-` lines with chroma highlighting
+- ✅ **Markdown rendering** in assistant messages via `glamour` with "dark" style
+- ✅ **Syntax highlighting** in code blocks via Chroma (integrated in glamour)
+- ✅ **Spinner** during tool execution (visible in Chat and Agents pages)
+- ✅ **Message streaming** with token-by-token accumulation
+- ✅ **Permission prompts** inline with yellow warning bar
+- ✅ **Text wrapping** with newline preservation
+- ✅ **Graceful fallback** to plain text if markdown rendering fails
+
+**Future Enhancements (decided, not yet implemented):**
+
+- **Inline diffs** when agents modify files: `+`/`-` lines with syntax highlighting
 - **Copy to clipboard** for code blocks and messages
 - **Hotkey menu** on messages: retry, edit, copy, delete
-- **Spinner** during tool execution (visible in both Chat and Agents pages)
 - **Notifications** for events (agent finished, errors) appear inline in the chat window
 - **Tool usage indicator**: Use `⚒` icon in chat when displaying tool invocations
 
 ---
 
-## Changelog & VFS
+## Changelog & VFS ⚠️
 
-The VFS (virtual filesystem) layer wraps all file operations exposed to V8. Before any destructive operation (write, truncate, unlink), the VFS snapshots the original file. The Changelog page reads these snapshots and presents them as restorable entries grouped by interaction. Restoring reverts all files in that group to their pre-modification state.
+**Status:** UI complete, snapshotting not integrated
+
+**Current Implementation:**
+
+- ✅ Changelog page UI fully functional with expandable entries and restore buttons
+- ✅ FS APIs (fs.read, fs.write, fs.unlink) callable from V8
+- ✅ Permission checks integrated into file operations
+- ❌ **File snapshotting not wired** (Changelog shows mock data)
+- ❌ **Restore functionality not connected to actual files**
+- ❌ **No interaction grouping for multi-file edits**
+
+**Planned Design:**
+
+The VFS (virtual filesystem) layer will wrap all file operations exposed to V8. Before any destructive operation (write, truncate, unlink), the VFS will snapshot the original file to `.cosmos/snapshots/<session-id>/<hash>`. The Changelog page will read these snapshots and present them as restorable entries grouped by interaction. Restoring will revert all files in that group to their pre-modification state.
 
 ---
 
