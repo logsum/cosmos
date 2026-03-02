@@ -9,7 +9,7 @@ import (
 )
 
 func TestLoad_ValidAgent(t *testing.T) {
-	result, err := Load("testdata", "", "", nil, nil)
+	result, err := Load("testdata", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestLoad_ValidAgent(t *testing.T) {
 
 func TestLoad_UserOverridesBuiltin(t *testing.T) {
 	// Both dirs contain valid-agent; user should win.
-	result, err := Load("testdata", "testdata", "", nil, nil)
+	result, err := Load("testdata", "testdata", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestLoad_BadManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Load(tmpDir, "", "", nil, nil)
+	result, err := Load(tmpDir, "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestLoad_BadManifest(t *testing.T) {
 }
 
 func TestLoad_EmptyDirs(t *testing.T) {
-	result, err := Load("/nonexistent/builtin", "/nonexistent/user", "", nil, nil)
+	result, err := Load("/nonexistent/builtin", "/nonexistent/user", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestFunctionToToolDef_NoParams(t *testing.T) {
 }
 
 func TestExecuteLoadedTool(t *testing.T) {
-	result, err := Load("testdata", "", "", nil, nil)
+	result, err := Load("testdata", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestLoad_MissingEntryFile(t *testing.T) {
 	}
 	// Intentionally do NOT create index.js.
 
-	result, err := Load(tmpDir, "", "", nil, nil)
+	result, err := Load(tmpDir, "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestLoad_PathTraversalEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Load(tmpDir, "", "", nil, nil)
+	result, err := Load(tmpDir, "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}

@@ -86,6 +86,13 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 			return throwJSError(v8iso, v8ctx, err.Error())
 		}
 
+		// Snapshot before write for VFS rollback.
+		if ctx.Snapshotter != nil {
+			if err := ctx.Snapshotter(path, "write", ctx.AgentName); err != nil {
+				fmt.Fprintf(os.Stderr, "cosmos: snapshot before write: %v\n", err)
+			}
+		}
+
 		// Open with O_NOFOLLOW: if the final component is a symlink, open
 		// fails with ELOOP, preventing symlink-based path escapes.
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
@@ -219,6 +226,13 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.unlink: refusing to remove symlink %s", path))
+		}
+
+		// Snapshot before delete for VFS rollback.
+		if ctx.Snapshotter != nil {
+			if err := ctx.Snapshotter(path, "delete", ctx.AgentName); err != nil {
+				fmt.Fprintf(os.Stderr, "cosmos: snapshot before unlink: %v\n", err)
+			}
 		}
 
 		if err := os.Remove(path); err != nil {

@@ -9,6 +9,7 @@ import (
 	"cosmos/engine/maintenance"
 	"cosmos/engine/policy"
 	"cosmos/engine/runtime"
+	"cosmos/engine/vfs"
 	"cosmos/providers/bedrock"
 	"cosmos/ui"
 	"fmt"
@@ -73,35 +74,58 @@ func Bootstrap(ctx context.Context) (*Application, error) {
 	// 5. Create pricing tracker with UI callbacks
 	tracker := setupTracker(notifier, currencyFormatter)
 
-	// 6. Create core session (executor, tools, adapter)
-	session, tools, executor, err := setupSession(ctx, cfg, llmProvider, tracker, notifier)
+	// 6. Create core session (executor, tools, adapter, snapshotter)
+	sr, err := setupSession(ctx, cfg, llmProvider, tracker, notifier)
 	if err != nil {
 		return nil, fmt.Errorf("initializing session: %w", err)
 	}
 	// From here, failures must clean up the executor (V8 isolates).
 	cleanup := func() {
-		if executor != nil {
-			executor.Close()
+		if sr.executor != nil {
+			sr.executor.Close()
+		}
+	}
+
+	// Build restore function for Changelog UI.
+	var restoreFunc ui.RestoreFunc
+	if sr.snapshotter != nil {
+		snap := sr.snapshotter
+		restoreFunc = func(interactionID string) tea.Cmd {
+			return func() tea.Msg {
+				paths, err := snap.RestoreInteraction(interactionID)
+				if err != nil {
+					return ui.ChangelogRestoreResultMsg{
+						InteractionID: interactionID,
+						Success:       false,
+						Message:       err.Error(),
+					}
+				}
+				return ui.ChangelogRestoreResultMsg{
+					InteractionID: interactionID,
+					Success:       true,
+					Message:       fmt.Sprintf("Restored %d file(s)", len(paths)),
+				}
+			}
 		}
 	}
 
 	// 7. Configure UI pages
-	if err := configureUI(scaffold, session, tools, cfg.DefaultModel); err != nil {
+	if err := configureUI(scaffold, sr.session, sr.tools, cfg.DefaultModel, restoreFunc); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("configuring UI: %w", err)
 	}
 
 	// 8. Create Bubble Tea program
-	program := setupProgram(scaffold, notifier, session)
+	program := setupProgram(scaffold, notifier, sr.session)
 
 	return &Application{
 		Config:            cfg,
-		Session:           session,
+		Session:           sr.session,
 		Scaffold:          scaffold,
 		Program:           program,
 		CurrencyFormatter: currencyFormatter,
 		Tracker:           tracker,
-		Executor:          executor,
+		Executor:          sr.executor,
 	}, nil
 }
 
@@ -175,6 +199,14 @@ func setupTracker(notifier *ui.Notifier, formatter *core.CurrencyFormatter) *cor
 	)
 }
 
+// setupSessionResult contains everything produced by setupSession.
+type setupSessionResult struct {
+	session     *core.Session
+	tools       []provider.ToolDefinition
+	executor    *runtime.V8Executor
+	snapshotter *vfs.Snapshotter
+}
+
 // setupSession creates the core session with executor, tools, and event adapter.
 func setupSession(
 	_ context.Context,
@@ -182,7 +214,7 @@ func setupSession(
 	llmProvider provider.Provider,
 	tracker *core.Tracker,
 	notifier *ui.Notifier,
-) (*core.Session, []provider.ToolDefinition, *runtime.V8Executor, error) {
+) (*setupSessionResult, error) {
 	adapter := &coreNotifierAdapter{ui: notifier}
 
 	// Create audit logger with session ID
@@ -202,21 +234,46 @@ func setupSession(
 	if err != nil {
 		// Policy file exists but is malformed or unreadable - this is a fatal error
 		// (if file doesn't exist, NewEvaluator succeeds with empty overrides)
-		return nil, nil, nil, fmt.Errorf("policy evaluator init failed: %w", err)
+		return nil, fmt.Errorf("policy evaluator init failed: %w", err)
+	}
+
+	// Create VFS snapshotter for file rollback.
+	snapshotter, err := vfs.NewSnapshotter(cosmosDir, sessionID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cosmos: warning: snapshotter init failed: %v\n", err)
+		snapshotter = nil
+	}
+
+	// Build snapshot function closure that bridges vfs → session.
+	// session is assigned below; we capture a pointer so the closure
+	// picks up the value once it's set.
+	var session *core.Session
+	var snapshotFunc runtime.SnapshotFunc
+	if snapshotter != nil {
+		snapshotFunc = func(path, operation, agentName string) error {
+			rec, err := snapshotter.Snapshot(path, operation, agentName)
+			if err != nil {
+				return err
+			}
+			if session != nil {
+				session.RecordFileChange(rec.Path, rec.Operation, rec.WasNewFile)
+			}
+			return nil
+		}
 	}
 
 	// Load agents from disk (builtin + user dirs) and wire V8 executor.
 	storageDir := filepath.Join(cosmosDir, "storage")
-	result, err := loader.Load("engine/agents", cfg.AgentsDir, storageDir, evaluator, nil)
+	result, err := loader.Load("engine/agents", cfg.AgentsDir, storageDir, evaluator, nil, snapshotFunc)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("loading agents: %w", err)
+		return nil, fmt.Errorf("loading agents: %w", err)
 	}
 	for _, agentErr := range result.Errors {
 		fmt.Fprintf(os.Stderr, "cosmos: warning: agent %s: %v\n", agentErr.Dir, agentErr.Err)
 	}
 
 	// Pass the same sessionID to both audit logger and session
-	session := core.NewSession(
+	session = core.NewSession(
 		sessionID,
 		llmProvider,
 		tracker,
@@ -230,6 +287,11 @@ func setupSession(
 		evaluator,
 	)
 
+	// Wire VFS snapshot context updater.
+	if snapshotter != nil {
+		session.SetSnapshotContextUpdater(snapshotter)
+	}
+
 	// Wire configurable permission timeout if set.
 	if cfg.PermissionTimeout > 0 {
 		session.SetPermissionTimeout(time.Duration(cfg.PermissionTimeout) * time.Second)
@@ -238,11 +300,16 @@ func setupSession(
 	// Wire sessions directory for /restore completions.
 	session.SetSessionsDir(cfg.SessionsDir)
 
-	return session, result.Tools, result.Executor, nil
+	return &setupSessionResult{
+		session:     session,
+		tools:       result.Tools,
+		executor:    result.Executor,
+		snapshotter: snapshotter,
+	}, nil
 }
 
 // configureUI sets up scaffold pages and status bar items.
-func configureUI(scaffold *ui.Scaffold, session *core.Session, tools []provider.ToolDefinition, model string) error {
+func configureUI(scaffold *ui.Scaffold, session *core.Session, tools []provider.ToolDefinition, model string, restoreFunc ui.RestoreFunc) error {
 	// Get current directory for status bar
 	currentDir, err := os.Getwd()
 	if err != nil {
@@ -259,7 +326,7 @@ func configureUI(scaffold *ui.Scaffold, session *core.Session, tools []provider.
 		uiTools[i] = ui.Tool{Name: t.Name, Description: t.Description}
 	}
 
-	ui.AddDefaultPages(scaffold, session, uiTools)
+	ui.AddDefaultPages(scaffold, session, uiTools, restoreFunc)
 	return nil
 }
 

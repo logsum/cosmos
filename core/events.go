@@ -124,3 +124,20 @@ type SessionRestoredEvent struct {
 	Description  string
 	MessageCount int
 }
+
+// FileChangeEvent signals files were modified by a tool execution.
+type FileChangeEvent struct {
+	InteractionID string
+	ToolCallID    string
+	ToolName      string
+	AgentName     string
+	Timestamp     time.Time
+	Changes       []FileChange
+}
+
+// FileChange describes a single file modification.
+type FileChange struct {
+	Path      string
+	Operation string // "write" | "delete"
+	WasNew    bool
+}

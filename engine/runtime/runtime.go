@@ -74,19 +74,22 @@ type V8Executor struct {
 	evaluator      *policy.Evaluator
 	storageDir     string
 	uiEmit         UIEmitFunc
-	allowLoopback  bool // skip loopback/private IP check in HTTP (for testing)
+	snapshotFunc   SnapshotFunc // called before destructive fs ops; nil = no snapshotting
+	allowLoopback  bool         // skip loopback/private IP check in HTTP (for testing)
 }
 
 // NewV8Executor creates an executor with a default API registry and optional
 // per-tool context dependencies. Pass nil evaluator to skip permission checks
 // (test/stub mode). Pass nil uiEmit for silent ui.emit (no-op).
-func NewV8Executor(evaluator *policy.Evaluator, storageDir string, uiEmit UIEmitFunc) *V8Executor {
+// Pass nil snapshotFunc to disable VFS snapshotting.
+func NewV8Executor(evaluator *policy.Evaluator, storageDir string, uiEmit UIEmitFunc, snapshotFunc SnapshotFunc) *V8Executor {
 	return &V8Executor{
-		tools:      make(map[string]*toolEntry),
-		registry:   NewAPIRegistry(),
-		evaluator:  evaluator,
-		storageDir: storageDir,
-		uiEmit:     uiEmit,
+		tools:        make(map[string]*toolEntry),
+		registry:     NewAPIRegistry(),
+		evaluator:    evaluator,
+		storageDir:   storageDir,
+		uiEmit:       uiEmit,
+		snapshotFunc: snapshotFunc,
 	}
 }
 
@@ -199,6 +202,7 @@ func (e *V8Executor) compile(entry *toolEntry) error {
 		Evaluator:     e.evaluator,
 		StorageDir:    e.storageDir,
 		UIEmit:        e.uiEmit,
+		Snapshotter:   e.snapshotFunc,
 		AllowLoopback: e.allowLoopback,
 	}
 	if err := injectToolAPIs(iso, global, toolCtx); err != nil {

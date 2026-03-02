@@ -32,7 +32,7 @@ func fsTestExecutor(t *testing.T, funcName, allowDir string) (*V8Executor, *Tool
 
 	toolCtx := testToolContext(t, "fs-agent", permissions)
 
-	e := NewV8Executor(toolCtx.Evaluator, toolCtx.StorageDir, nil)
+	e := NewV8Executor(toolCtx.Evaluator, toolCtx.StorageDir, nil, nil)
 	t.Cleanup(func() { e.Close() })
 
 	srcPath := testFixturePath(t, "fs-agent", "index.js")

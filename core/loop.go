@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -73,6 +75,12 @@ type ToolManifestProvider interface {
 	ToolPermissionRules(name string) (agentName string, rules []manifest.PermissionRule, ok bool)
 }
 
+// SnapshotContextUpdater sets the current interaction/tool context for VFS.
+// Implemented by engine/vfs.Snapshotter.
+type SnapshotContextUpdater interface {
+	SetSnapshotContext(interactionID, toolCallID string)
+}
+
 // Session manages a single LLM conversation loop.
 //
 // Threading model:
@@ -122,6 +130,14 @@ type Session struct {
 	// Used for rate-limiting permission prompts (5s window).
 	// Accessed only from the single-threaded loop goroutine — no mutex needed.
 	recentPrompts map[string]time.Time
+
+	// VFS snapshot context — set via SetSnapshotContextUpdater.
+	// pendingFileChanges is written by RecordFileChange (called from the
+	// snapshot closure inside executor.Execute) and read/reset by the tool
+	// dispatch section of processUserMessage. Both run on the single-threaded
+	// loop goroutine — no mutex needed (same invariant as recentPrompts).
+	snapshotUpdater    SnapshotContextUpdater // set before Start()
+	pendingFileChanges []FileChange           // accumulated during a single tool execution
 }
 
 // Notifier interface for UI updates. The Send method accepts any event type;
@@ -140,6 +156,22 @@ func (s *Session) SetPermissionTimeout(d time.Duration) {
 // Must be called before Start().
 func (s *Session) SetSessionsDir(dir string) {
 	s.sessionsDir = dir
+}
+
+// SetSnapshotContextUpdater wires the VFS snapshotter for context tracking.
+// Must be called before Start().
+func (s *Session) SetSnapshotContextUpdater(u SnapshotContextUpdater) {
+	s.snapshotUpdater = u
+}
+
+// RecordFileChange accumulates a file change during tool execution.
+// Called from the bootstrap snapshot closure (same goroutine as tool execution).
+func (s *Session) RecordFileChange(path, operation string, wasNew bool) {
+	s.pendingFileChanges = append(s.pendingFileChanges, FileChange{
+		Path:      path,
+		Operation: operation,
+		WasNew:    wasNew,
+	})
 }
 
 // HistorySnapshot returns a thread-safe copy of the current conversation history.
@@ -460,6 +492,7 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 			s.mu.Unlock()
 
 			// Dispatch each tool call and collect results
+			interactionID := uuid.New().String()
 			var toolResults []provider.ToolResult
 			for _, tc := range toolCalls {
 				// Notify UI of tool invocation
@@ -489,6 +522,12 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 						IsError:   true,
 					}
 				} else {
+					// Set VFS snapshot context for this tool call.
+					if s.snapshotUpdater != nil {
+						s.snapshotUpdater.SetSnapshotContext(interactionID, tc.ID)
+					}
+					s.pendingFileChanges = nil
+
 					result, execErr := s.executor.Execute(ctx, tc.Name, tc.Input)
 					tr = provider.ToolResult{
 						ToolUseID: tc.ID,
@@ -497,6 +536,23 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 					if execErr != nil {
 						tr.Content = execErr.Error()
 						tr.IsError = true
+					}
+
+					// Emit file change event if any files were modified.
+					if len(s.pendingFileChanges) > 0 {
+						agentName := ""
+						if mp, ok := s.executor.(ToolManifestProvider); ok {
+							agentName, _, _ = mp.ToolPermissionRules(tc.Name)
+						}
+						s.notifier.Send(FileChangeEvent{
+							InteractionID: interactionID,
+							ToolCallID:    tc.ID,
+							ToolName:      tc.Name,
+							AgentName:     agentName,
+							Timestamp:     time.Now().UTC(),
+							Changes:       append([]FileChange{}, s.pendingFileChanges...),
+						})
+						s.pendingFileChanges = nil
 					}
 				}
 				toolResults = append(toolResults, tr)

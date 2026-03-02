@@ -108,6 +108,21 @@ func (a *coreNotifierAdapter) Send(msg any) {
 		a.ui.Send(ui.ChatSystemMsg{Text: text})
 	case core.SessionRestoredEvent:
 		a.ui.Send(ui.ChatSystemMsg{Text: fmt.Sprintf("Restored: %s (%d messages)", e.Description, e.MessageCount)})
+	case core.FileChangeEvent:
+		files := make([]ui.ChangelogFile, len(e.Changes))
+		for i, c := range e.Changes {
+			files[i] = ui.ChangelogFile{Path: c.Path, Operation: c.Operation, WasNew: c.WasNew}
+		}
+		desc := fmt.Sprintf("%s modified %d file(s)", e.ToolName, len(e.Changes))
+		if e.AgentName != "" {
+			desc = fmt.Sprintf("%s (%s) modified %d file(s)", e.ToolName, e.AgentName, len(e.Changes))
+		}
+		a.ui.Send(ui.ChangelogEntryMsg{
+			InteractionID: e.InteractionID,
+			Timestamp:     e.Timestamp.Local().Format("2006-01-02 15:04:05"),
+			Description:   desc,
+			Files:         files,
+		})
 	default:
 		// Log unhandled events to detect integration mistakes during refactors.
 		// This should never happen in production if all core events are properly handled.

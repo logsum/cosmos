@@ -202,15 +202,17 @@ Every API call goes through the policy evaluator before executing.
 File safety net — every write is reversible.
 
 ### 4.1 VFS Layer
-- [ ] Wrap all `fs.*` APIs through VFS
-- [ ] Before any destructive op (write, truncate, unlink): snapshot original file
-- [ ] Store snapshots in `.cosmos/snapshots/<session-id>/<hash>`
-- [ ] Track interaction grouping (which tool call triggered which writes)
+- [x] Wrap all `fs.*` APIs through VFS (`engine/vfs/` package + `SnapshotFunc` in `ToolContext`)
+- [x] Before any destructive op (write, unlink): snapshot original file
+- [x] Store snapshots in `.cosmos/snapshots/<session-id>/<hash>` (content-addressed, deduped)
+- [x] Track interaction grouping (which tool call triggered which writes)
+- [x] File size limit: skip blob for files >50 MB (record `TooLarge` flag)
+- [x] Preserve original file permissions in snapshot/restore
 
 ### 4.2 Changelog Integration
-- [ ] Replace mock data in `changelog.go` with real VFS snapshot entries
-- [ ] Group entries by interaction (multi-file edits in one exchange)
-- [ ] Implement "Restore" action: revert all files in a group to snapshot state
+- [x] Replace mock data in `changelog.go` with real VFS snapshot entries
+- [x] Group entries by interaction (multi-file edits in one exchange)
+- [x] Implement "Restore" action: revert all files in a group to snapshot state
 - [ ] Timestamp and description from audit log correlation
 
 ---

@@ -37,6 +37,7 @@ func TestAllCoreEventsHandled(t *testing.T) {
 	var _ interface{} = core.HistoryClearedEvent{}
 	var _ interface{} = core.ContextInfoEvent{}
 	var _ interface{} = core.SessionRestoredEvent{}
+	var _ interface{} = core.FileChangeEvent{}
 
 	// If a new event type is added to core/events.go, add it here.
 	// The adapter's Send() method must also handle it.

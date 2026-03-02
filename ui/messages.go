@@ -111,3 +111,25 @@ type ChatSystemMsg struct{ Text string }
 // ChatClearMsg instructs the chat page to flush all visible content to the
 // terminal scrollback and then reset its in-memory message state.
 type ChatClearMsg struct{}
+
+// ChangelogEntryMsg adds/updates a file change entry in the Changelog page.
+type ChangelogEntryMsg struct {
+	InteractionID string
+	Timestamp     string
+	Description   string
+	Files         []ChangelogFile
+}
+
+// ChangelogFile describes a single file modification for the Changelog page.
+type ChangelogFile struct {
+	Path      string
+	Operation string
+	WasNew    bool
+}
+
+// ChangelogRestoreResultMsg carries the result of a restore operation.
+type ChangelogRestoreResultMsg struct {
+	InteractionID string
+	Success       bool
+	Message       string
+}

@@ -77,7 +77,7 @@ func TestEffectiveTimeout(t *testing.T) {
 }
 
 func TestToolRegistration(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	spec := echoSpec(t)
@@ -117,7 +117,7 @@ func TestConsoleLogDefault(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	if err := e.RegisterTool(ToolSpec{
@@ -166,7 +166,7 @@ func TestEscapeJSString(t *testing.T) {
 }
 
 func TestExecuteEcho(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	if err := e.RegisterTool(echoSpec(t)); err != nil {
@@ -196,7 +196,7 @@ func TestExecuteEcho(t *testing.T) {
 }
 
 func TestExecuteUnknown(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	_, err := e.Execute(context.Background(), "nonexistent", nil)
@@ -209,7 +209,7 @@ func TestExecuteUnknown(t *testing.T) {
 }
 
 func TestLazyLoading(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	spec := echoSpec(t)
@@ -245,7 +245,7 @@ func TestLazyLoading(t *testing.T) {
 }
 
 func TestTimeout(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	m := loadTestManifest(t, "timeout")
@@ -276,7 +276,7 @@ func TestTimeout(t *testing.T) {
 }
 
 func TestJSException(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	m := loadTestManifest(t, "error")
@@ -312,7 +312,7 @@ func TestHotReload(t *testing.T) {
 		t.Fatalf("write initial: %v", err)
 	}
 
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	spec := ToolSpec{
@@ -354,7 +354,7 @@ func TestHotReload(t *testing.T) {
 }
 
 func TestClose(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 
 	spec := echoSpec(t)
 	if err := e.RegisterTool(spec); err != nil {
@@ -374,7 +374,7 @@ func TestClose(t *testing.T) {
 }
 
 func TestContextCancellation(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	// Use timeout fixture (infinite loop) but cancel via context.
@@ -410,7 +410,7 @@ func TestContextCancellation(t *testing.T) {
 }
 
 func TestIsolateIsolation(t *testing.T) {
-	e := NewV8Executor(nil, "", nil)
+	e := NewV8Executor(nil, "", nil, nil)
 	defer e.Close()
 
 	// Create two tools in separate temp files, each setting a global.

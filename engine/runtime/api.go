@@ -14,15 +14,20 @@ import (
 // core's notifier.
 type UIEmitFunc func(agentName, message string)
 
+// SnapshotFunc is called before destructive file operations to capture state.
+// Non-fatal: errors are logged but don't block the operation.
+type SnapshotFunc func(path, operation, agentName string) error
+
 // ToolContext provides per-tool state to API callbacks.
 // Each isolate gets its own ToolContext — no shared mutable state.
 type ToolContext struct {
 	AgentName      string
 	Manifest       manifest.Manifest
 	Evaluator      *policy.Evaluator
-	StorageDir     string     // e.g., .cosmos/storage/
-	UIEmit         UIEmitFunc // callback to send messages to chat
-	AllowLoopback  bool       // skip loopback/private IP check in HTTP (for testing)
+	StorageDir     string       // e.g., .cosmos/storage/
+	UIEmit         UIEmitFunc   // callback to send messages to chat
+	Snapshotter    SnapshotFunc // called before destructive fs ops; nil = no snapshotting
+	AllowLoopback  bool         // skip loopback/private IP check in HTTP (for testing)
 }
 
 // APIBinding describes a single Go function exposed to JavaScript.

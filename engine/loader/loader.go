@@ -56,13 +56,15 @@ type agentData struct {
 // Load discovers agents, creates a V8Executor, registers all tools,
 // and builds the ToolDefinition list for the LLM.
 //
-// builtinDir: e.g., "engine/agents" (may not exist)
-// userDir:    e.g., ~/.cosmos/agents (may not exist)
-// storageDir: e.g., .cosmos/storage/ (for per-agent KV)
-// evaluator:  policy evaluator (nil = allow all)
-// uiEmit:     callback for ui.emit() (nil = no-op)
+// builtinDir:   e.g., "engine/agents" (may not exist)
+// userDir:      e.g., ~/.cosmos/agents (may not exist)
+// storageDir:   e.g., .cosmos/storage/ (for per-agent KV)
+// evaluator:    policy evaluator (nil = allow all)
+// uiEmit:       callback for ui.emit() (nil = no-op)
+// snapshotFunc: callback before destructive fs ops (nil = no snapshotting)
 func Load(builtinDir, userDir, storageDir string,
-	evaluator *policy.Evaluator, uiEmit runtime.UIEmitFunc) (*LoadResult, error) {
+	evaluator *policy.Evaluator, uiEmit runtime.UIEmitFunc,
+	snapshotFunc runtime.SnapshotFunc) (*LoadResult, error) {
 
 	// 1. Discover agents from both locations.
 	agents := discoverAgents(builtinDir, "builtin")
@@ -123,7 +125,7 @@ func Load(builtinDir, userDir, storageDir string,
 
 	// 5. Create V8Executor and register tools.
 	// Only advertise tools that register successfully.
-	executor := runtime.NewV8Executor(evaluator, storageDir, uiEmit)
+	executor := runtime.NewV8Executor(evaluator, storageDir, uiEmit, snapshotFunc)
 	var toolDefs []provider.ToolDefinition
 	for _, te := range toolEntries {
 		if err := executor.RegisterTool(te.spec); err != nil {

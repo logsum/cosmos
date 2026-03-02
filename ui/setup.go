@@ -65,8 +65,8 @@ func FormatModelName(modelID string) string {
 	return modelID
 }
 
-func AddDefaultPages(s *Scaffold, session SessionSubmitter, tools []Tool) {
+func AddDefaultPages(s *Scaffold, session SessionSubmitter, tools []Tool, restoreFunc RestoreFunc) {
 	s.AddPage("chat", "Chat", NewChatModel(session))
 	s.AddPage("agents", "Agents", NewAgentsModel(s, tools))
-	s.AddPage("changelog", "Changelog", NewChangelogModel(s))
+	s.AddPage("changelog", "Changelog", NewChangelogModel(s, restoreFunc))
 }
