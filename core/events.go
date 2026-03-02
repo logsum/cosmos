@@ -104,3 +104,23 @@ type PermissionTimeoutEvent struct {
 	ToolCallID string
 	Allowed    bool // Whether the default was to allow (from DefaultAllow)
 }
+
+// ModelChangedEvent signals that the active model has been changed via /model.
+type ModelChangedEvent struct{ ModelID string }
+
+// HistoryClearedEvent signals that the conversation history was reset via /clear.
+type HistoryClearedEvent struct{}
+
+// ContextInfoEvent carries context usage info for the /context command response.
+type ContextInfoEvent struct {
+	Percentage float64
+	Used       int
+	Total      int
+	ModelID    string
+}
+
+// SessionRestoredEvent signals a session was successfully restored from disk via /restore.
+type SessionRestoredEvent struct {
+	Description  string
+	MessageCount int
+}

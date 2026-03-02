@@ -102,3 +102,12 @@ type PermissionDecisionMsg struct {
 	Allowed    bool
 	Remember   bool
 }
+
+// ChatSystemMsg is an informational system message rendered inline in chat
+// (e.g. responses to /clear, /context, /model commands). Displayed in dim gray
+// with no colored bar.
+type ChatSystemMsg struct{ Text string }
+
+// ChatClearMsg instructs the chat page to flush all visible content to the
+// terminal scrollback and then reset its in-memory message state.
+type ChatClearMsg struct{}

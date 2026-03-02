@@ -102,12 +102,16 @@ type Session struct {
 	evaluator         *policy.Evaluator   // nil if policy checks disabled; internally thread-safe
 	permissionTimeout time.Duration       // 0 = use defaultPermissionTimeout; configurable for tests
 
+	createdAt   time.Time // set at creation, immutable
+	sessionsDir string    // for /restore completions; set via SetSessionsDir
+
 	mu sync.Mutex
-	history     []provider.Message
-	userMsgChan chan string
-	stopChan    chan struct{}
-	stopOnce    sync.Once
-	wg          sync.WaitGroup // Tracks in-flight operations (loop, message processing)
+	history      []provider.Message
+	userMsgChan  chan string
+	stopChan     chan struct{}
+	stopOnce     sync.Once
+	wg           sync.WaitGroup // Tracks in-flight operations (loop, message processing)
+	cachedModels []provider.ModelInfo // pre-fetched for /model tab completions
 
 	cachedModelInfo *provider.ModelInfo
 	modelInfoOnce   sync.Once
@@ -130,6 +134,56 @@ type Notifier interface {
 // Must be called before Start(). Zero uses the default (30s).
 func (s *Session) SetPermissionTimeout(d time.Duration) {
 	s.permissionTimeout = d
+}
+
+// SetSessionsDir sets the directory used for /restore tab completions.
+// Must be called before Start().
+func (s *Session) SetSessionsDir(dir string) {
+	s.sessionsDir = dir
+}
+
+// HistorySnapshot returns a thread-safe copy of the current conversation history.
+func (s *Session) HistorySnapshot() []provider.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]provider.Message{}, s.history...)
+}
+
+// Completions returns tab completion strings for the given input prefix.
+// Supports /model <id> and /restore <filename> completions.
+func (s *Session) Completions(prefix string) []string {
+	switch {
+	case strings.HasPrefix(prefix, "/model "):
+		partial := strings.TrimPrefix(prefix, "/model ")
+		s.mu.Lock()
+		models := append([]provider.ModelInfo{}, s.cachedModels...)
+		s.mu.Unlock()
+		var completions []string
+		for _, m := range models {
+			if strings.HasPrefix(m.ID, partial) {
+				completions = append(completions, "/model "+m.ID)
+			}
+		}
+		return completions
+
+	case strings.HasPrefix(prefix, "/restore "):
+		partial := strings.TrimPrefix(prefix, "/restore ")
+		if s.sessionsDir == "" {
+			return nil
+		}
+		sessions, err := ListSavedSessions(s.sessionsDir)
+		if err != nil || len(sessions) == 0 {
+			return nil
+		}
+		var completions []string
+		for _, sess := range sessions {
+			if strings.HasPrefix(sess.Filename, partial) {
+				completions = append(completions, "/restore "+sess.Filename)
+			}
+		}
+		return completions
+	}
+	return nil
 }
 
 // NewSession creates a new conversation session
@@ -158,6 +212,7 @@ func NewSession(
 		id:            sessionID,
 		auditLogger:   auditLogger,
 		evaluator:     evaluator,
+		createdAt:     time.Now().UTC(),
 		history:       []provider.Message{},
 		userMsgChan:   make(chan string, 16), // Buffered for responsiveness
 		stopChan:      make(chan struct{}),
@@ -174,10 +229,21 @@ func (s *Session) SubmitMessage(text string) {
 	}
 }
 
-// Start begins the background conversation loop
+// Start begins the background conversation loop and pre-fetches model metadata.
 func (s *Session) Start(ctx context.Context) {
 	s.wg.Add(1)
 	go s.loop(ctx)
+
+	// Pre-fetch models in background for /model tab completions.
+	// Not tracked by wg — this goroutine is best-effort and may be cancelled.
+	go func() {
+		models, err := s.provider.ListModels(ctx)
+		if err == nil {
+			s.mu.Lock()
+			s.cachedModels = models
+			s.mu.Unlock()
+		}
+	}()
 }
 
 // Stop gracefully terminates the session. It is safe to call multiple times.
@@ -244,9 +310,11 @@ type pendingToolCall struct {
 // It continues looping as long as the model requests tool use, and exits
 // when the model produces a final text response (end_turn).
 func (s *Session) processUserMessage(ctx context.Context, text string) error {
-	// Check for commands before adding to history
-	if text == "/compact" {
-		return s.handleCompactCommand(ctx)
+	// Dispatch known slash commands before adding to history.
+	// Unrecognized /-prefixed text is sent as a normal user message
+	// (users may paste paths or code starting with /).
+	if handled, err := s.handleCommand(ctx, text); handled {
+		return err
 	}
 
 	// Append user message to history
@@ -559,9 +627,125 @@ func (s *Session) getModelInfo(ctx context.Context) (*provider.ModelInfo, error)
 	return s.cachedModelInfo, nil
 }
 
+// handleCommand dispatches a known slash command to its handler.
+// Returns (true, err) if the text was a recognized command, (false, nil) otherwise.
+// Unrecognized /-prefixed text should be treated as a normal user message.
+func (s *Session) handleCommand(ctx context.Context, text string) (bool, error) {
+	parts := strings.SplitN(strings.TrimSpace(text), " ", 2)
+	verb := parts[0]
+	args := ""
+	if len(parts) > 1 {
+		args = strings.TrimSpace(parts[1])
+	}
+
+	switch verb {
+	case "/compact":
+		return true, s.handleCompactCommand(ctx)
+	case "/model":
+		return true, s.handleModelCommand(ctx, args)
+	case "/clear":
+		return true, s.handleClearCommand(ctx)
+	case "/context":
+		return true, s.handleContextCommand(ctx)
+	case "/restore":
+		return true, s.handleRestoreCommand(ctx, args)
+	default:
+		return false, nil
+	}
+}
+
 // handleCompactCommand processes the /compact user command.
 func (s *Session) handleCompactCommand(ctx context.Context) error {
 	return s.performCompaction(ctx, "manual")
+}
+
+// handleModelCommand processes the /model <id> user command.
+func (s *Session) handleModelCommand(_ context.Context, args string) error {
+	if args == "" {
+		s.notifier.Send(ErrorEvent{Error: "usage: /model <model-id>"})
+		return nil
+	}
+	s.mu.Lock()
+	s.model = args
+	s.cachedModelInfo = nil
+	s.modelInfoOnce = sync.Once{}
+	s.mu.Unlock()
+
+	s.notifier.Send(ModelChangedEvent{ModelID: args})
+	return nil
+}
+
+// handleClearCommand processes the /clear user command.
+func (s *Session) handleClearCommand(_ context.Context) error {
+	s.mu.Lock()
+	s.history = []provider.Message{}
+	s.warned50 = false
+	s.mu.Unlock()
+
+	s.notifier.Send(HistoryClearedEvent{})
+	return nil
+}
+
+// handleContextCommand processes the /context user command.
+func (s *Session) handleContextCommand(ctx context.Context) error {
+	modelInfo, _ := s.getModelInfo(ctx)
+
+	s.mu.Lock()
+	estimated := s.estimateTokenCount(s.history)
+	modelID := s.model
+	s.mu.Unlock()
+
+	total := 0
+	pct := 0.0
+	if modelInfo != nil && modelInfo.ContextWindow > 0 {
+		total = modelInfo.ContextWindow
+		pct = float64(estimated) / float64(total) * 100.0
+	}
+
+	s.notifier.Send(ContextInfoEvent{
+		Percentage: pct,
+		Used:       estimated,
+		Total:      total,
+		ModelID:    modelID,
+	})
+	return nil
+}
+
+// handleRestoreCommand processes the /restore <filename> user command.
+func (s *Session) handleRestoreCommand(_ context.Context, args string) error {
+	if args == "" {
+		s.notifier.Send(ErrorEvent{Error: "usage: /restore <session-file>"})
+		return nil
+	}
+	if s.sessionsDir == "" {
+		s.notifier.Send(ErrorEvent{Error: "session restore not available: sessions directory not configured"})
+		return nil
+	}
+
+	saved, err := LoadSavedSession(s.sessionsDir, args)
+	if err != nil {
+		s.notifier.Send(ErrorEvent{Error: fmt.Sprintf("restore failed: %v", err)})
+		return nil
+	}
+
+	s.mu.Lock()
+	s.history = saved.History
+	if saved.Model != "" {
+		s.model = saved.Model
+		s.cachedModelInfo = nil
+		s.modelInfoOnce = sync.Once{}
+	}
+	s.warned50 = false
+	s.mu.Unlock()
+
+	s.notifier.Send(SessionRestoredEvent{
+		Description:  saved.Description,
+		MessageCount: len(saved.History),
+	})
+	if saved.Model != "" {
+		s.notifier.Send(ModelChangedEvent{ModelID: saved.Model})
+	}
+	return nil
 }
 
 // performCompaction executes the actual compaction logic (shared by manual and auto).

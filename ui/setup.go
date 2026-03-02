@@ -13,6 +13,12 @@ type SessionSubmitter interface {
 	SubmitMessage(text string)
 }
 
+// CompletionProvider provides tab completion strings for a given input prefix.
+// core.Session satisfies this interface without requiring a ui→core import.
+type CompletionProvider interface {
+	Completions(prefix string) []string
+}
+
 func ConfigureDefaultScaffold(s *Scaffold, currentDir string, model string) {
 	s.KeyMap.SwitchTabLeft = key.NewBinding(
 		key.WithKeys("shift+left", "["),
@@ -35,15 +41,15 @@ func ConfigureDefaultScaffold(s *Scaffold, currentDir string, model string) {
 
 	s.AddStatusItem("path", "□ "+currentDir)
 	s.AddStatusItem("branch", "⎇ main")
-	s.AddStatusItem("model", "⚙ "+formatModelName(model))
+	s.AddStatusItem("model", "⚙ "+FormatModelName(model))
 	s.AddStatusItem("tokens", "▲0 ▼0")
 	s.AddStatusItem("context", "⚡0%")
 	s.AddActionableStatusItem("cost", "$0.00")
 }
 
-// formatModelName extracts a human-readable name from a full model ID.
+// FormatModelName extracts a human-readable name from a full model ID.
 // e.g. "us.anthropic.claude-3-5-sonnet-20241022-v2:0" → "claude-3-5-sonnet-20241022-v2"
-func formatModelName(modelID string) string {
+func FormatModelName(modelID string) string {
 	// Strip regional prefix (e.g., "us.", "eu.", "ap.")
 	for _, prefix := range []string{"us.", "eu.", "ap."} {
 		modelID = strings.TrimPrefix(modelID, prefix)

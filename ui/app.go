@@ -13,10 +13,11 @@ type PromptSubmitMsg struct {
 
 // AppConfig holds optional configuration for an App.
 type AppConfig struct {
-	Placeholder string
-	CharLimit   int
-	Width       int
-	PromptGlyph string
+	Placeholder        string
+	CharLimit          int
+	Width              int
+	PromptGlyph        string
+	CompletionProvider CompletionProvider // optional; enables tab-cycling completions
 }
 
 // App is a top-level tea.Model that wraps a Scaffold with a text-input prompt.
@@ -25,6 +26,10 @@ type App struct {
 	promptInput       textinput.Model
 	promptGlyph       string
 	permissionPending bool // True when an inline permission prompt is active in chat
+
+	completionProvider CompletionProvider
+	completions        []string
+	completionIdx      int // -1 = no active selection
 }
 
 // NewApp creates an App from an existing Scaffold and config.
@@ -51,9 +56,11 @@ func NewApp(scaffold *Scaffold, cfg AppConfig) *App {
 	}
 
 	return &App{
-		Scaffold:    scaffold,
-		promptInput: ti,
-		promptGlyph: glyph,
+		Scaffold:           scaffold,
+		promptInput:        ti,
+		promptGlyph:        glyph,
+		completionProvider: cfg.CompletionProvider,
+		completionIdx:      -1,
 	}
 }
 
@@ -92,6 +99,38 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case tea.KeyMsg:
+		// Tab-cycling completion (intercept before prompt input consumes tab).
+		if promptEnabled && a.completionProvider != nil {
+			switch msg.String() {
+			case "tab":
+				if len(a.completions) == 0 {
+					a.completions = a.completionProvider.Completions(a.promptInput.Value())
+					a.completionIdx = -1
+				}
+				if len(a.completions) > 0 {
+					a.completionIdx = (a.completionIdx + 1) % len(a.completions)
+					a.promptInput.SetValue(a.completions[a.completionIdx])
+				}
+				return a, nil // Don't forward tab to scaffold or prompt input
+
+			case "shift+tab":
+				if len(a.completions) > 0 {
+					a.completionIdx--
+					if a.completionIdx < 0 {
+						a.completionIdx = len(a.completions) - 1
+					}
+					a.promptInput.SetValue(a.completions[a.completionIdx])
+				}
+				return a, nil
+			}
+		}
+
+		// Any non-tab key clears the completion list.
+		if msg.String() != "tab" && msg.String() != "shift+tab" {
+			a.completions = nil
+			a.completionIdx = -1
+		}
+
 		if promptEnabled && msg.String() == "enter" && a.promptInput.Value() != "" {
 			value := a.promptInput.Value()
 			a.promptInput.SetValue("")

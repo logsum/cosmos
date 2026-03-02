@@ -69,6 +69,7 @@ type chatMessage struct {
 	isError   bool
 	isTool    bool
 	isWarning bool // for system warnings (context, etc.)
+	isSystem  bool // for command responses (/clear, /context, /model, /restore)
 	tool      *toolInfo
 
 	// Permission request handling
@@ -510,6 +511,31 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ChatSystemMsg:
+		m.finalizeAccumulatedText()
+		m.messages = append(m.messages, chatMessage{
+			text:     msg.Text,
+			isSystem: true,
+		})
+		flushCmd := m.flushOldMessages()
+		if flushCmd != nil {
+			return m, flushCmd
+		}
+		return m, nil
+
+	case ChatClearMsg:
+		// Flush everything to scrollback, then reset state.
+		m.finalizeAccumulatedText()
+		flushCmd := m.flushAllMessages()
+		m.messages = nil
+		m.accumulatedText = ""
+		m.assistantHeaderPrinted = false
+		m.flushedLineCount = 0
+		if flushCmd != nil {
+			return m, flushCmd
+		}
+		return m, nil
+
 	case ChatPermissionRequestMsg:
 		// Finalize any in-progress text before showing permission request
 		m.finalizeAccumulatedText()
@@ -678,6 +704,17 @@ func (m *ChatModel) View() string {
 				} else {
 					content.WriteString("  " + line + "\n")
 				}
+			}
+			content.WriteString("\n") // blank separator
+			continue
+		}
+
+		if msg.isSystem {
+			// System messages (command responses) — dim gray, no bar
+			systemStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+			wrappedLines := wrapText(msg.text, availableWidth)
+			for _, line := range wrappedLines {
+				content.WriteString(systemStyle.Render(line) + "\n")
 			}
 			content.WriteString("\n") // blank separator
 			continue
@@ -941,6 +978,36 @@ func (m *ChatModel) flushOldMessages() tea.Cmd {
 	return tea.Printf("%s", toFlush.String())
 }
 
+// flushAllMessages writes ALL remaining unflushed lines (including on-screen ones)
+// to stdout. Used before clearing chat state so nothing is lost from scrollback.
+func (m *ChatModel) flushAllMessages() tea.Cmd {
+	if len(m.messages) == 0 && m.accumulatedText == "" {
+		return nil
+	}
+
+	availableWidth := m.width - 2
+	if availableWidth < 20 {
+		availableWidth = 20
+	}
+
+	allLines := m.buildAllRenderedLines(availableWidth)
+	if m.flushedLineCount >= len(allLines) {
+		return nil // Everything already flushed
+	}
+
+	var toFlush strings.Builder
+	for i := m.flushedLineCount; i < len(allLines); i++ {
+		toFlush.WriteString(allLines[i])
+		toFlush.WriteString("\n")
+	}
+
+	if toFlush.Len() == 0 {
+		return nil
+	}
+
+	return tea.Printf("%s", toFlush.String())
+}
+
 // buildAllRenderedLines builds the complete rendered output (with ANSI colors and bars)
 // for all messages as individual lines, ready for stdout flushing.
 //
@@ -1002,6 +1069,16 @@ func (m *ChatModel) buildAllRenderedLines(availableWidth int) []string {
 				} else {
 					lines = append(lines, "  "+line)
 				}
+			}
+			lines = append(lines, "") // blank separator
+			continue
+		}
+
+		if msg.isSystem {
+			// System messages — dim gray, no bar
+			wrappedLines := wrapText(msg.text, availableWidth)
+			for _, line := range wrappedLines {
+				lines = append(lines, ansiDim+line+ansiReset)
 			}
 			lines = append(lines, "") // blank separator
 			continue

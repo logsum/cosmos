@@ -89,6 +89,25 @@ func (a *coreNotifierAdapter) Send(msg any) {
 			ToolCallID: e.ToolCallID,
 			Allowed:    e.Allowed,
 		})
+	case core.ModelChangedEvent:
+		a.ui.Send(ui.StatusItemUpdateMsg{
+			Key:   "model",
+			Value: "⚙ " + ui.FormatModelName(e.ModelID),
+		})
+		a.ui.Send(ui.ChatSystemMsg{Text: "Model changed to " + e.ModelID})
+	case core.HistoryClearedEvent:
+		a.ui.Send(ui.ChatClearMsg{})
+		a.ui.Send(ui.ChatSystemMsg{Text: "Conversation cleared."})
+	case core.ContextInfoEvent:
+		var text string
+		if e.Total > 0 {
+			text = fmt.Sprintf("Context: %.0f%% (%d / %d tokens) — %s", e.Percentage, e.Used, e.Total, e.ModelID)
+		} else {
+			text = fmt.Sprintf("Context: ~%d tokens used (context window unknown for %s)", e.Used, e.ModelID)
+		}
+		a.ui.Send(ui.ChatSystemMsg{Text: text})
+	case core.SessionRestoredEvent:
+		a.ui.Send(ui.ChatSystemMsg{Text: fmt.Sprintf("Restored: %s (%d messages)", e.Description, e.MessageCount)})
 	default:
 		// Log unhandled events to detect integration mistakes during refactors.
 		// This should never happen in production if all core events are properly handled.

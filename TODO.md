@@ -218,18 +218,23 @@ File safety net — every write is reversible.
 ## Phase 5: Session Management
 
 ### 5.1 Session Persistence (`core/session.go`)
-- [ ] Save session on exit: messages, token usage, cost, agents invoked, files modified
-- [ ] File format: `~/.cosmos/sessions/<project-path-dotted>-<timestamp>.json`
-- [ ] Session description: user's last prompt
-- [ ] Load session for restore
+- [x] Save session on exit: messages, token usage, cost to `~/.cosmos/sessions/<base>-<timestamp>.json`
+- [x] Atomic write (`.tmp` then `os.Rename`) with path traversal guard on load
+- [x] Session description: first user message, ≤100 runes
+- [x] Load session for restore (`LoadSavedSession`)
+- [x] List saved sessions sorted newest-first (`ListSavedSessions`)
 
 ### 5.2 Chat Commands
-- [ ] `/model <name>` — switch model, tab-completion from `ListModels`
-- [ ] `/clear` — clear conversation, start fresh session
-- [ ] `/compact` — summarize conversation to reduce token usage
-- [ ] `/context` — show token usage / context window percentage
-- [ ] `/restore <session>` — restore saved session, tab-completion from session list
-- [ ] Command parsing in chat input (detect `/` prefix, route accordingly)
+- [x] `/model <name>` — switch model, tab-completion from `ListModels`
+- [x] `/clear` — clear conversation, flush chat to scrollback, start fresh
+- [x] `/compact` — summarize conversation to reduce token usage
+- [x] `/context` — show token usage / context window percentage
+- [x] `/restore <session>` — restore saved session, tab-completion from session list
+- [x] Command parsing: known verbs dispatched, unrecognized `/`-prefixed text treated as normal message
+- [x] Inline tab-cycling completion for `/model` and `/restore`
+
+### 5.3 Follow-up
+- [ ] `/restore` UI replay: render restored messages in chat (currently shows only system message)
 
 ---
 

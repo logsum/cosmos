@@ -2,6 +2,9 @@ package app
 
 import (
 	"cosmos/core"
+	"cosmos/ui"
+	"fmt"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,6 +33,10 @@ func TestAllCoreEventsHandled(t *testing.T) {
 	var _ interface{} = core.CompactionFailedEvent{}
 	var _ interface{} = core.PermissionRequestEvent{}
 	var _ interface{} = core.PermissionTimeoutEvent{}
+	var _ interface{} = core.ModelChangedEvent{}
+	var _ interface{} = core.HistoryClearedEvent{}
+	var _ interface{} = core.ContextInfoEvent{}
+	var _ interface{} = core.SessionRestoredEvent{}
 
 	// If a new event type is added to core/events.go, add it here.
 	// The adapter's Send() method must also handle it.
@@ -60,9 +67,143 @@ func TestAdapterDefaultCase(t *testing.T) {
 	t.Log("Default case handles unknown events without panic")
 }
 
-// mockUINotifier is a minimal mock for testing
+// mockUINotifier is a minimal mock for testing (no-op).
 type mockUINotifier struct{}
 
-func (m *mockUINotifier) Send(msg tea.Msg) {
-	// No-op for testing
+func (m *mockUINotifier) Send(tea.Msg) {}
+
+// collectingUINotifier captures all messages sent through the adapter.
+type collectingUINotifier struct {
+	mu   sync.Mutex
+	msgs []tea.Msg
+}
+
+func (c *collectingUINotifier) Send(msg tea.Msg) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs = append(c.msgs, msg)
+}
+
+func (c *collectingUINotifier) all() []tea.Msg {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]tea.Msg{}, c.msgs...)
+}
+
+func TestAdapterModelChangedEvent(t *testing.T) {
+	col := &collectingUINotifier{}
+	adapter := &coreNotifierAdapter{ui: col}
+
+	adapter.Send(core.ModelChangedEvent{ModelID: "anthropic.claude-3-sonnet"})
+
+	msgs := col.all()
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	status, ok := msgs[0].(ui.StatusItemUpdateMsg)
+	if !ok {
+		t.Fatalf("expected StatusItemUpdateMsg, got %T", msgs[0])
+	}
+	if status.Key != "model" {
+		t.Errorf("expected key 'model', got %q", status.Key)
+	}
+	sys, ok := msgs[1].(ui.ChatSystemMsg)
+	if !ok {
+		t.Fatalf("expected ChatSystemMsg, got %T", msgs[1])
+	}
+	if sys.Text != "Model changed to anthropic.claude-3-sonnet" {
+		t.Errorf("unexpected system text: %q", sys.Text)
+	}
+}
+
+func TestAdapterHistoryClearedEvent(t *testing.T) {
+	col := &collectingUINotifier{}
+	adapter := &coreNotifierAdapter{ui: col}
+
+	adapter.Send(core.HistoryClearedEvent{})
+
+	msgs := col.all()
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if _, ok := msgs[0].(ui.ChatClearMsg); !ok {
+		t.Fatalf("expected ChatClearMsg, got %T", msgs[0])
+	}
+	sys, ok := msgs[1].(ui.ChatSystemMsg)
+	if !ok {
+		t.Fatalf("expected ChatSystemMsg, got %T", msgs[1])
+	}
+	if sys.Text != "Conversation cleared." {
+		t.Errorf("unexpected system text: %q", sys.Text)
+	}
+}
+
+func TestAdapterContextInfoEvent(t *testing.T) {
+	col := &collectingUINotifier{}
+	adapter := &coreNotifierAdapter{ui: col}
+
+	adapter.Send(core.ContextInfoEvent{
+		Percentage: 42.5,
+		Used:       4250,
+		Total:      10000,
+		ModelID:    "test-model",
+	})
+
+	msgs := col.all()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	sys, ok := msgs[0].(ui.ChatSystemMsg)
+	if !ok {
+		t.Fatalf("expected ChatSystemMsg, got %T", msgs[0])
+	}
+	expected := fmt.Sprintf("Context: %.0f%% (%d / %d tokens) — %s", 42.5, 4250, 10000, "test-model")
+	if sys.Text != expected {
+		t.Errorf("expected %q, got %q", expected, sys.Text)
+	}
+}
+
+func TestAdapterContextInfoEvent_UnknownWindow(t *testing.T) {
+	col := &collectingUINotifier{}
+	adapter := &coreNotifierAdapter{ui: col}
+
+	adapter.Send(core.ContextInfoEvent{
+		Percentage: 0,
+		Used:       3000,
+		Total:      0,
+		ModelID:    "unknown-model",
+	})
+
+	msgs := col.all()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	sys := msgs[0].(ui.ChatSystemMsg)
+	expected := fmt.Sprintf("Context: ~%d tokens used (context window unknown for %s)", 3000, "unknown-model")
+	if sys.Text != expected {
+		t.Errorf("expected %q, got %q", expected, sys.Text)
+	}
+}
+
+func TestAdapterSessionRestoredEvent(t *testing.T) {
+	col := &collectingUINotifier{}
+	adapter := &coreNotifierAdapter{ui: col}
+
+	adapter.Send(core.SessionRestoredEvent{
+		Description:  "Hello world",
+		MessageCount: 12,
+	})
+
+	msgs := col.all()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	sys, ok := msgs[0].(ui.ChatSystemMsg)
+	if !ok {
+		t.Fatalf("expected ChatSystemMsg, got %T", msgs[0])
+	}
+	expected := "Restored: Hello world (12 messages)"
+	if sys.Text != expected {
+		t.Errorf("expected %q, got %q", expected, sys.Text)
+	}
 }

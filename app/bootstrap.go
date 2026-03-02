@@ -92,7 +92,7 @@ func Bootstrap(ctx context.Context) (*Application, error) {
 	}
 
 	// 8. Create Bubble Tea program
-	program := setupProgram(scaffold, notifier)
+	program := setupProgram(scaffold, notifier, session)
 
 	return &Application{
 		Config:            cfg,
@@ -235,6 +235,9 @@ func setupSession(
 		session.SetPermissionTimeout(time.Duration(cfg.PermissionTimeout) * time.Second)
 	}
 
+	// Wire sessions directory for /restore completions.
+	session.SetSessionsDir(cfg.SessionsDir)
+
 	return session, result.Tools, result.Executor, nil
 }
 
@@ -261,10 +264,11 @@ func configureUI(scaffold *ui.Scaffold, session *core.Session, tools []provider.
 }
 
 // setupProgram creates the Bubble Tea program with correct screen mode.
-func setupProgram(scaffold *ui.Scaffold, notifier *ui.Notifier) *tea.Program {
+func setupProgram(scaffold *ui.Scaffold, notifier *ui.Notifier, session *core.Session) *tea.Program {
 	app := ui.NewApp(scaffold, ui.AppConfig{
-		Placeholder: "Type your message here...",
-		CharLimit:   0, // unlimited
+		Placeholder:        "Type your message here...",
+		CharLimit:          0, // unlimited
+		CompletionProvider: session,
 	})
 
 	// IMPORTANT: DO NOT use tea.WithAltScreen()!

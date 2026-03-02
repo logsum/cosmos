@@ -1692,3 +1692,351 @@ func TestPermissionRequestFlow_ContextCancelled(t *testing.T) {
 
 	session.Stop()
 }
+
+// --- Command handler tests ---
+
+func TestHandleModelCommand(t *testing.T) {
+	prov := &mockProvider{
+		calls:  [][]provider.StreamChunk{textChunks("Hi")},
+		models: []provider.ModelInfo{{ID: "model-a"}, {ID: "model-b"}},
+	}
+	notifier := &mockNotifier{}
+	session := newTestSession(prov, nil, notifier)
+
+	err := session.processUserMessage(context.Background(), "/model new-model-id")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Check model changed event was emitted
+	msgs := notifier.getMessages()
+	found := false
+	for _, m := range msgs {
+		if ev, ok := m.(ModelChangedEvent); ok && ev.ModelID == "new-model-id" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected ModelChangedEvent with 'new-model-id', not found")
+	}
+
+	// Verify the model field actually changed
+	session.mu.Lock()
+	if session.model != "new-model-id" {
+		t.Errorf("expected model to be 'new-model-id', got %q", session.model)
+	}
+	session.mu.Unlock()
+}
+
+func TestHandleModelCommand_NoArgs(t *testing.T) {
+	notifier := &mockNotifier{}
+	session := newTestSession(&mockProvider{}, nil, notifier)
+
+	err := session.processUserMessage(context.Background(), "/model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := notifier.getMessages()
+	found := false
+	for _, m := range msgs {
+		if ev, ok := m.(ErrorEvent); ok && strings.Contains(ev.Error, "usage") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected ErrorEvent with usage hint, not found")
+	}
+}
+
+func TestHandleClearCommand(t *testing.T) {
+	prov := &mockProvider{calls: [][]provider.StreamChunk{
+		textChunks("first response"),
+	}}
+	notifier := &mockNotifier{}
+	session := newTestSession(prov, nil, notifier)
+
+	// Send a message to build history
+	err := session.processUserMessage(context.Background(), "Hello")
+	if err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	session.mu.Lock()
+	if len(session.history) == 0 {
+		t.Fatal("expected non-empty history before /clear")
+	}
+	session.mu.Unlock()
+
+	// Clear
+	err = session.processUserMessage(context.Background(), "/clear")
+	if err != nil {
+		t.Fatalf("/clear failed: %v", err)
+	}
+
+	session.mu.Lock()
+	if len(session.history) != 0 {
+		t.Errorf("expected empty history after /clear, got %d messages", len(session.history))
+	}
+	session.mu.Unlock()
+
+	// Verify event
+	msgs := notifier.getMessages()
+	found := false
+	for _, m := range msgs {
+		if _, ok := m.(HistoryClearedEvent); ok {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected HistoryClearedEvent, not found")
+	}
+}
+
+func TestHandleContextCommand(t *testing.T) {
+	prov := &mockProvider{
+		calls:  [][]provider.StreamChunk{textChunks("Hi")},
+		models: []provider.ModelInfo{{ID: "test-model", ContextWindow: 100000}},
+	}
+	notifier := &mockNotifier{}
+	session := newTestSession(prov, nil, notifier)
+
+	// Build some history first
+	err := session.processUserMessage(context.Background(), "Hello")
+	if err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	notifier.mu.Lock()
+	notifier.msgs = nil
+	notifier.mu.Unlock()
+
+	err = session.processUserMessage(context.Background(), "/context")
+	if err != nil {
+		t.Fatalf("/context failed: %v", err)
+	}
+
+	msgs := notifier.getMessages()
+	found := false
+	for _, m := range msgs {
+		if ev, ok := m.(ContextInfoEvent); ok {
+			found = true
+			if ev.ModelID != "test-model" {
+				t.Errorf("expected model ID 'test-model', got %q", ev.ModelID)
+			}
+			if ev.Total != 100000 {
+				t.Errorf("expected total 100000, got %d", ev.Total)
+			}
+			if ev.Used <= 0 {
+				t.Errorf("expected Used > 0, got %d", ev.Used)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected ContextInfoEvent, not found")
+	}
+}
+
+func TestHandleRestoreCommand_NotConfigured(t *testing.T) {
+	notifier := &mockNotifier{}
+	session := newTestSession(&mockProvider{}, nil, notifier)
+
+	err := session.processUserMessage(context.Background(), "/restore something.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := notifier.getMessages()
+	found := false
+	for _, m := range msgs {
+		if ev, ok := m.(ErrorEvent); ok && strings.Contains(ev.Error, "not configured") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected ErrorEvent about sessions dir not configured")
+	}
+}
+
+func TestHandleRestoreCommand_FileNotFound(t *testing.T) {
+	dir := t.TempDir()
+	notifier := &mockNotifier{}
+	session := newTestSession(&mockProvider{}, nil, notifier)
+	session.SetSessionsDir(dir)
+
+	err := session.processUserMessage(context.Background(), "/restore nonexistent.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := notifier.getMessages()
+	found := false
+	for _, m := range msgs {
+		if ev, ok := m.(ErrorEvent); ok && strings.Contains(ev.Error, "restore failed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected ErrorEvent about restore failure")
+	}
+}
+
+func TestHandleRestoreCommand_Success(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a session with some history, then save it.
+	prov := &mockProvider{calls: [][]provider.StreamChunk{textChunks("Saved reply")}}
+	notifier := &mockNotifier{}
+	original := newTestSession(prov, nil, notifier)
+	original.model = "original-model"
+
+	err := original.processUserMessage(t.Context(), "Hello from saved session")
+	if err != nil {
+		t.Fatalf("processUserMessage failed: %v", err)
+	}
+
+	err = SaveSession(original, nil, dir, "/projects/test")
+	if err != nil {
+		t.Fatalf("SaveSession failed: %v", err)
+	}
+
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 session file, got %d", len(entries))
+	}
+	filename := entries[0].Name()
+
+	// Create a fresh session and restore the saved one.
+	notifier2 := &mockNotifier{}
+	fresh := newTestSession(&mockProvider{}, nil, notifier2)
+	fresh.SetSessionsDir(dir)
+
+	err = fresh.processUserMessage(t.Context(), "/restore "+filename)
+	if err != nil {
+		t.Fatalf("/restore failed: %v", err)
+	}
+
+	// Verify history was replaced.
+	fresh.mu.Lock()
+	histLen := len(fresh.history)
+	model := fresh.model
+	fresh.mu.Unlock()
+
+	if histLen != 2 {
+		t.Errorf("expected 2 messages in history after restore, got %d", histLen)
+	}
+	if model != "original-model" {
+		t.Errorf("expected model 'original-model', got %q", model)
+	}
+
+	// Verify SessionRestoredEvent was emitted.
+	msgs := notifier2.getMessages()
+	foundRestored := false
+	foundModelChanged := false
+	for _, m := range msgs {
+		if ev, ok := m.(SessionRestoredEvent); ok {
+			foundRestored = true
+			if ev.MessageCount != 2 {
+				t.Errorf("expected MessageCount 2, got %d", ev.MessageCount)
+			}
+			if ev.Description != "Hello from saved session" {
+				t.Errorf("unexpected description: %q", ev.Description)
+			}
+		}
+		if ev, ok := m.(ModelChangedEvent); ok && ev.ModelID == "original-model" {
+			foundModelChanged = true
+		}
+	}
+	if !foundRestored {
+		t.Error("expected SessionRestoredEvent, not found")
+	}
+	if !foundModelChanged {
+		t.Error("expected ModelChangedEvent for restored model, not found")
+	}
+}
+
+func TestUnknownSlashPrefix_TreatedAsMessage(t *testing.T) {
+	prov := &mockProvider{calls: [][]provider.StreamChunk{
+		textChunks("I see you mentioned a path"),
+	}}
+	notifier := &mockNotifier{}
+	session := newTestSession(prov, nil, notifier)
+
+	// A /-prefixed string that is NOT a known command should be treated as a normal user message
+	err := session.processUserMessage(context.Background(), "/usr/local/bin is the path")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify it was added to history as a user message (not an error)
+	session.mu.Lock()
+	if len(session.history) == 0 {
+		t.Fatal("expected message in history")
+	}
+	first := session.history[0]
+	session.mu.Unlock()
+
+	if first.Role != provider.RoleUser {
+		t.Errorf("expected user role, got %s", first.Role)
+	}
+	if first.Content != "/usr/local/bin is the path" {
+		t.Errorf("unexpected content: %q", first.Content)
+	}
+
+	// Verify no ErrorEvent was emitted
+	msgs := notifier.getMessages()
+	for _, m := range msgs {
+		if _, ok := m.(ErrorEvent); ok {
+			t.Error("unexpected ErrorEvent — unknown /-prefix should be treated as normal message")
+		}
+	}
+}
+
+func TestCompletions_Model(t *testing.T) {
+	session := newTestSession(&mockProvider{}, nil, &mockNotifier{})
+
+	session.mu.Lock()
+	session.cachedModels = []provider.ModelInfo{
+		{ID: "us.anthropic.claude-3-5-sonnet"},
+		{ID: "us.anthropic.claude-3-haiku"},
+		{ID: "eu.meta.llama-3"},
+	}
+	session.mu.Unlock()
+
+	completions := session.Completions("/model us.")
+	if len(completions) != 2 {
+		t.Fatalf("expected 2 completions for 'us.', got %d: %v", len(completions), completions)
+	}
+
+	all := session.Completions("/model ")
+	if len(all) != 3 {
+		t.Fatalf("expected 3 completions for empty prefix, got %d", len(all))
+	}
+
+	none := session.Completions("/model zzz")
+	if len(none) != 0 {
+		t.Errorf("expected 0 completions for 'zzz', got %d", len(none))
+	}
+}
+
+func TestCompletions_Restore(t *testing.T) {
+	dir := t.TempDir()
+	session := newTestSession(&mockProvider{}, nil, &mockNotifier{})
+	session.SetSessionsDir(dir)
+
+	completions := session.Completions("/restore ")
+	if len(completions) != 0 {
+		t.Errorf("expected 0 completions for empty sessions dir, got %d", len(completions))
+	}
+
+	completions = session.Completions("/unknown")
+	if completions != nil {
+		t.Errorf("expected nil for unknown prefix, got %v", completions)
+	}
+}
