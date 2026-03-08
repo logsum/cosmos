@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -245,18 +246,29 @@ func setupSession(
 	}
 
 	// Build snapshot function closure that bridges vfs → session.
-	// session is assigned below; we capture a pointer so the closure
-	// picks up the value once it's set.
+	// Thread-safe map tracks file changes per tool call ID to avoid race
+	// conditions during concurrent tool execution.
+	// interactionID and toolCallID are passed per-call (not via shared state)
+	// to eliminate TOCTOU races between SetSnapshotContext and Snapshot.
 	var session *core.Session
+	var fileChangesMu sync.Mutex
+	fileChangesByTool := make(map[string][]core.FileChange)
 	var snapshotFunc runtime.SnapshotFunc
 	if snapshotter != nil {
-		snapshotFunc = func(path, operation, agentName string) error {
-			rec, err := snapshotter.Snapshot(path, operation, agentName)
+		snapshotFunc = func(path, operation, agentName, interactionID, toolCallID string) error {
+			rec, err := snapshotter.Snapshot(path, operation, agentName, interactionID, toolCallID)
 			if err != nil {
 				return err
 			}
-			if session != nil {
-				session.RecordFileChange(rec.Path, rec.Operation, rec.WasNewFile)
+			// Append to the map keyed by tool call ID (passed per-call, not shared state).
+			if toolCallID != "" {
+				fileChangesMu.Lock()
+				fileChangesByTool[toolCallID] = append(fileChangesByTool[toolCallID], core.FileChange{
+					Path:      rec.Path,
+					Operation: rec.Operation,
+					WasNew:    rec.WasNewFile,
+				})
+				fileChangesMu.Unlock()
 			}
 			return nil
 		}
@@ -287,10 +299,14 @@ func setupSession(
 		evaluator,
 	)
 
-	// Wire VFS snapshot context updater.
-	if snapshotter != nil {
-		session.SetSnapshotContextUpdater(snapshotter)
-	}
+	// Wire file change retrieval function (thread-safe access to per-tool changes).
+	session.SetFileChangesFunc(func(toolCallID string) []core.FileChange {
+		fileChangesMu.Lock()
+		defer fileChangesMu.Unlock()
+		changes := fileChangesByTool[toolCallID]
+		delete(fileChangesByTool, toolCallID) // Consume once
+		return changes
+	})
 
 	// Wire configurable permission timeout if set.
 	if cfg.PermissionTimeout > 0 {

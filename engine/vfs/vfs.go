@@ -39,11 +39,9 @@ type SnapshotRecord struct {
 // Snapshotter is a per-session snapshot manager. It stores file content
 // before destructive operations so they can be rolled back.
 type Snapshotter struct {
-	mu            sync.Mutex
-	sessionDir    string           // .cosmos/snapshots/<session-id>/
-	records       []SnapshotRecord
-	interactionID string // current LLM turn (set externally)
-	toolCallID    string // current tool call (set externally)
+	mu         sync.Mutex
+	sessionDir string           // .cosmos/snapshots/<session-id>/
+	records    []SnapshotRecord
 }
 
 // NewSnapshotter creates a snapshot manager for the given session.
@@ -76,20 +74,14 @@ func NewSnapshotter(cosmosDir, sessionID string) (*Snapshotter, error) {
 	return s, nil
 }
 
-// SetSnapshotContext sets the current interaction and tool call IDs.
-// Called by the core loop before each tool execution.
-func (s *Snapshotter) SetSnapshotContext(interactionID, toolCallID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.interactionID = interactionID
-	s.toolCallID = toolCallID
-}
-
 // Snapshot captures the current content of a file before a destructive
 // operation. The content is stored as a content-addressed blob. If the
 // file does not exist (new file creation), WasNewFile is set and no
 // blob is stored. Returns the snapshot record.
-func (s *Snapshotter) Snapshot(path, operation, agentName string) (*SnapshotRecord, error) {
+//
+// interactionID and toolCallID are passed per-call to avoid shared mutable
+// state races during concurrent tool execution.
+func (s *Snapshotter) Snapshot(path, operation, agentName, interactionID, toolCallID string) (*SnapshotRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -97,8 +89,8 @@ func (s *Snapshotter) Snapshot(path, operation, agentName string) (*SnapshotReco
 		Path:          path,
 		Operation:     operation,
 		AgentName:     agentName,
-		InteractionID: s.interactionID,
-		ToolCallID:    s.toolCallID,
+		InteractionID: interactionID,
+		ToolCallID:    toolCallID,
 		Timestamp:     time.Now().UTC(),
 	}
 

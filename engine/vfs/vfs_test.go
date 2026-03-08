@@ -36,8 +36,7 @@ func TestSnapshotExistingFile(t *testing.T) {
 		t.Fatalf("NewSnapshotter: %v", err)
 	}
 
-	snap.SetSnapshotContext("interaction-1", "tool-call-1")
-	rec, err := snap.Snapshot(filePath, "write", "test-agent")
+	rec, err := snap.Snapshot(filePath, "write", "test-agent", "interaction-1", "tool-call-1")
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -84,9 +83,8 @@ func TestSnapshotNewFile(t *testing.T) {
 		t.Fatalf("NewSnapshotter: %v", err)
 	}
 
-	snap.SetSnapshotContext("i1", "tc1")
 	filePath := filepath.Join(dir, "nonexistent.txt")
-	rec, err := snap.Snapshot(filePath, "write", "test-agent")
+	rec, err := snap.Snapshot(filePath, "write", "test-agent", "i1", "tc1")
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -115,12 +113,11 @@ func TestContentDeduplication(t *testing.T) {
 		t.Fatalf("NewSnapshotter: %v", err)
 	}
 
-	snap.SetSnapshotContext("i1", "tc1")
-	rec1, err := snap.Snapshot(file1, "write", "agent")
+	rec1, err := snap.Snapshot(file1, "write", "agent", "i1", "tc1")
 	if err != nil {
 		t.Fatalf("Snapshot file1: %v", err)
 	}
-	rec2, err := snap.Snapshot(file2, "write", "agent")
+	rec2, err := snap.Snapshot(file2, "write", "agent", "i1", "tc1")
 	if err != nil {
 		t.Fatalf("Snapshot file2: %v", err)
 	}
@@ -160,8 +157,7 @@ func TestRestoreInteraction(t *testing.T) {
 		t.Fatalf("NewSnapshotter: %v", err)
 	}
 
-	snap.SetSnapshotContext("i1", "tc1")
-	if _, err := snap.Snapshot(filePath, "write", "agent"); err != nil {
+	if _, err := snap.Snapshot(filePath, "write", "agent", "i1", "tc1"); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
@@ -199,8 +195,7 @@ func TestRestoreNewFile(t *testing.T) {
 		t.Fatalf("NewSnapshotter: %v", err)
 	}
 
-	snap.SetSnapshotContext("i1", "tc1")
-	if _, err := snap.Snapshot(filePath, "write", "agent"); err != nil {
+	if _, err := snap.Snapshot(filePath, "write", "agent", "i1", "tc1"); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
@@ -233,8 +228,7 @@ func TestManifestPersistence(t *testing.T) {
 		t.Fatalf("NewSnapshotter 1: %v", err)
 	}
 
-	snap1.SetSnapshotContext("i1", "tc1")
-	if _, err := snap1.Snapshot(filePath, "write", "agent"); err != nil {
+	if _, err := snap1.Snapshot(filePath, "write", "agent", "i1", "tc1"); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
@@ -281,8 +275,7 @@ func TestReadSnapshotContent(t *testing.T) {
 		t.Fatalf("NewSnapshotter: %v", err)
 	}
 
-	snap.SetSnapshotContext("i1", "tc1")
-	rec, err := snap.Snapshot(filePath, "write", "agent")
+	rec, err := snap.Snapshot(filePath, "write", "agent", "i1", "tc1")
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -312,12 +305,10 @@ func TestMultipleFilesInInteraction(t *testing.T) {
 		t.Fatalf("NewSnapshotter: %v", err)
 	}
 
-	snap.SetSnapshotContext("i1", "tc1")
-	if _, err := snap.Snapshot(file1, "write", "agent"); err != nil {
+	if _, err := snap.Snapshot(file1, "write", "agent", "i1", "tc1"); err != nil {
 		t.Fatalf("Snapshot file1: %v", err)
 	}
-	snap.SetSnapshotContext("i1", "tc2")
-	if _, err := snap.Snapshot(file2, "write", "agent"); err != nil {
+	if _, err := snap.Snapshot(file2, "write", "agent", "i1", "tc2"); err != nil {
 		t.Fatalf("Snapshot file2: %v", err)
 	}
 
@@ -357,16 +348,14 @@ func TestMultipleSnapshotsSameFile(t *testing.T) {
 	}
 
 	// First snapshot (captures v1).
-	snap.SetSnapshotContext("i1", "tc1")
-	if _, err := snap.Snapshot(filePath, "write", "agent"); err != nil {
+	if _, err := snap.Snapshot(filePath, "write", "agent", "i1", "tc1"); err != nil {
 		t.Fatalf("Snapshot v1: %v", err)
 	}
 
 	mustWrite(t, filePath, "v2")
 
 	// Second snapshot (captures v2) — same interaction, same file.
-	snap.SetSnapshotContext("i1", "tc2")
-	if _, err := snap.Snapshot(filePath, "write", "agent"); err != nil {
+	if _, err := snap.Snapshot(filePath, "write", "agent", "i1", "tc2"); err != nil {
 		t.Fatalf("Snapshot v2: %v", err)
 	}
 
@@ -403,8 +392,7 @@ func TestRestorePreservesFileMode(t *testing.T) {
 		t.Fatalf("NewSnapshotter: %v", err)
 	}
 
-	snap.SetSnapshotContext("i1", "tc1")
-	rec, err := snap.Snapshot(filePath, "write", "agent")
+	rec, err := snap.Snapshot(filePath, "write", "agent", "i1", "tc1")
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}

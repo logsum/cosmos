@@ -63,6 +63,26 @@ type toolIsolate struct {
 type toolEntry struct {
 	spec    ToolSpec
 	isolate *toolIsolate
+	toolCtx *ToolContext // set at compile time; per-execution fields updated under ti.mu
+}
+
+// execContextKey is the context key type for per-execution IDs.
+type execContextKey struct{}
+
+// ExecContext holds per-execution IDs passed through context.Context.
+type ExecContext struct {
+	InteractionID string
+	ToolCallID    string
+}
+
+// WithExecContext returns a child context carrying per-execution IDs.
+// Satisfies core.ExecutionContexter so the core loop can pass IDs through
+// context.Context instead of a two-phase Set/Execute approach.
+func (e *V8Executor) WithExecContext(ctx context.Context, interactionID, toolCallID string) context.Context {
+	return context.WithValue(ctx, execContextKey{}, ExecContext{
+		InteractionID: interactionID,
+		ToolCallID:    toolCallID,
+	})
 }
 
 // V8Executor runs JavaScript tools in sandboxed V8 isolates.
@@ -135,7 +155,9 @@ func (e *V8Executor) RegisterTool(spec ToolSpec) error {
 
 // Execute runs a tool by function name. It satisfies core.ToolExecutor.
 //
-//	func (e *V8Executor) Execute(ctx context.Context, name string, input map[string]any) (string, error)
+// Per-execution context (interactionID, toolCallID) is read from ctx via
+// WithExecContext. This avoids the race condition of a two-phase Set/Execute
+// approach where goroutine scheduling could mismatch IDs.
 func (e *V8Executor) Execute(ctx context.Context, name string, input map[string]any) (string, error) {
 	// Hold executor lock until isolate lock is acquired to prevent a race
 	// where Close() disposes the isolate between map lookup and ti.mu.Lock().
@@ -164,6 +186,19 @@ func (e *V8Executor) Execute(ctx context.Context, name string, input map[string]
 	if !ti.compiled {
 		if err := e.compile(entry); err != nil {
 			return "", fmt.Errorf("compile %s: %w", name, err)
+		}
+	}
+
+	// Apply per-execution context AFTER compile/reload so a fresh ToolContext
+	// (created by compile) receives the correct IDs. Clear stale IDs if the
+	// context doesn't carry ExecContext (e.g., direct Execute with Background).
+	if entry.toolCtx != nil {
+		if ec, ok := ctx.Value(execContextKey{}).(ExecContext); ok {
+			entry.toolCtx.InteractionID = ec.InteractionID
+			entry.toolCtx.ToolCallID = ec.ToolCallID
+		} else {
+			entry.toolCtx.InteractionID = ""
+			entry.toolCtx.ToolCallID = ""
 		}
 	}
 
@@ -196,7 +231,8 @@ func (e *V8Executor) compile(entry *toolEntry) error {
 	}
 
 	// Per-tool bindings (fs, http, storage, ui) with captured context.
-	toolCtx := &ToolContext{
+	// InteractionID and ToolCallID are set per-execution in Execute().
+	entry.toolCtx = &ToolContext{
 		AgentName:     spec.AgentName,
 		Manifest:      spec.Manifest,
 		Evaluator:     e.evaluator,
@@ -205,7 +241,7 @@ func (e *V8Executor) compile(entry *toolEntry) error {
 		Snapshotter:   e.snapshotFunc,
 		AllowLoopback: e.allowLoopback,
 	}
-	if err := injectToolAPIs(iso, global, toolCtx); err != nil {
+	if err := injectToolAPIs(iso, global, entry.toolCtx); err != nil {
 		iso.Dispose()
 		return fmt.Errorf("inject tool APIs: %w", err)
 	}
@@ -366,7 +402,7 @@ func hasWritePermissions(m *manifest.Manifest) bool {
 		if mode == manifest.PermissionDeny {
 			continue
 		}
-		if strings.HasPrefix(key, "fs:write") || strings.HasPrefix(key, "docker:") {
+		if strings.HasPrefix(key, "fs:write") || strings.HasPrefix(key, "fs:unlink") || strings.HasPrefix(key, "docker:") {
 			return true
 		}
 	}

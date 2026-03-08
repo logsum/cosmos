@@ -191,9 +191,9 @@ Every API call goes through the policy evaluator before executing.
 ### 3.4 Tool Dispatch Integration
 - [x] Core loop calls `engine.Execute(agentName, functionName, args)` on tool_use
 - [x] Wire to real manifest permission checks for all agents via `ToolManifestProvider` interface
-- [ ] Engine checks policy → runs in V8 → returns result or error
-- [ ] Concurrent read-only tools; sequential write tools (derived from permissions)
-- [ ] Return structured result to core loop for LLM consumption
+- [x] Engine checks policy → runs in V8 → returns result or error
+- [x] Concurrent read-only tools; sequential write tools (derived from permissions)
+- [x] Return structured result to core loop for LLM consumption
 
 ---
 

@@ -491,7 +491,35 @@ Tools have zero direct host access. All capabilities come from Go-side APIs inje
 
 ### Concurrency
 
-Read-only tools can run concurrently. Write tools run sequentially. This is derived from the permission flags in the manifest — if a tool has `fs:write`, the scheduler serializes it.
+**Status:** ✅ Fully implemented (Phase 3.4)
+
+Cosmos implements **batched concurrent execution** for tool calls:
+
+**Classification:**
+- **Write tools**: Tools with `fs:write` or `docker:*` permissions (non-deny mode)
+- **Read-only tools**: All other tools (including pure functions with no permissions)
+
+**Batching Strategy:**
+Consecutive read-only tool calls are grouped into batches for concurrent execution. Write tools break batches and execute sequentially.
+
+**Example:**
+```
+Tool calls: [R1, R2, W1, R3, R4]
+Execution:
+  Batch 1: R1 || R2 (concurrent) → results [0, 1]
+  Batch 2: W1 (sequential)        → result [2]
+  Batch 3: R3 || R4 (concurrent) → results [3, 4]
+Final: [R1, R2, W1, R3, R4] (same order as input)
+```
+
+**Performance Gain:**
+For N read-only tools, latency reduces from `sum(T1...TN)` to `max(T1...TN)`.
+
+**Thread Safety:**
+- All components (executor, evaluator, notifier, auditLogger) are thread-safe
+- File changes tracked per tool call ID in a mutex-protected map (see `app/bootstrap.go`)
+- Results collected in pre-allocated slices (no race conditions)
+- Event ordering preserved (batches execute in order, events emitted in tool call order)
 
 ---
 
@@ -605,7 +633,7 @@ Every evaluation returns the source of the decision:
 - ✅ **Fields**: timestamp, sessionID, agent, tool, permission, decision, decisionSource, arguments
 - ✅ **Redaction**: Automatically redacts keys containing "token", "key", "password", "secret", "credential", "auth"
 - ✅ **Cleanup**: Session-based cleanup via `engine/maintenance` package (deletes after 30 days)
-- ✅ **Thread-safe**: Single-threaded writes, no concurrent audit operations
+- ✅ **Thread-safe**: Mutex-protected writes from concurrent tool execution
 - ⚠️ **UI Integration**: Agents page History view designed but currently shows mock data
 
 ### Permission Request UI Flow
@@ -667,9 +695,11 @@ When a tool requires user permission (`request_once` or `request_always`), the f
 **Threading Model:**
 
 - Core loop is single-threaded (sequential message processing)
-- `checkPermission()` called synchronously from `processUserMessage()`
+- `checkPermission()` called from `executeSingleTool()` (may run concurrently for read-only tools)
 - `evaluator.Evaluate()` and `RecordOnceDecision()` are internally thread-safe (`sync.Mutex`)
-- No concurrent permission checks (tools execute sequentially)
+- Read-only tools execute concurrently (goroutines per tool via `sync.WaitGroup`)
+- Write tools execute sequentially (one at a time)
+- All tool execution functions (`executor`, `evaluator`, `notifier`, `auditLogger`) are thread-safe
 
 ---
 

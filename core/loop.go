@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -75,10 +76,19 @@ type ToolManifestProvider interface {
 	ToolPermissionRules(name string) (agentName string, rules []manifest.PermissionRule, ok bool)
 }
 
-// SnapshotContextUpdater sets the current interaction/tool context for VFS.
-// Implemented by engine/vfs.Snapshotter.
-type SnapshotContextUpdater interface {
-	SetSnapshotContext(interactionID, toolCallID string)
+// toolBatch groups consecutive tool calls by their read/write characteristics.
+// Read-only batches can be executed concurrently; write batches must be sequential.
+type toolBatch struct {
+	isWrite   bool // true if any tool in this batch has write permissions
+	toolCalls []provider.ToolCall
+	startIdx  int // original index of first tool call (for result ordering)
+}
+
+// ExecutionContexter is an optional interface that ToolExecutor implementations
+// can satisfy to wrap a context with per-execution IDs (interactionID, toolCallID).
+// This allows the executor to pass IDs to snapshot functions without shared mutable state.
+type ExecutionContexter interface {
+	WithExecContext(ctx context.Context, interactionID, toolCallID string) context.Context
 }
 
 // Session manages a single LLM conversation loop.
@@ -87,13 +97,18 @@ type SnapshotContextUpdater interface {
 //   - Session.Start() creates a background goroutine (loop()) that processes user messages.
 //   - User messages are sent via SendMessage() which writes to userMsgChan (buffered).
 //   - The loop goroutine sequentially processes each message, calling processUserMessage().
-//   - Tool execution and permission checks happen synchronously within processUserMessage().
+//   - Tool execution: Read-only tools run concurrently (goroutines per tool), write tools run sequentially.
+//   - Batching: Consecutive read-only tools are grouped and executed in parallel. Write tools break batches.
+//   - Permission checks happen before tool execution in executeSingleTool() (called from both concurrent and sequential paths).
 //   - UI interactions (permission prompts) block on channel communication but don't fork goroutines.
 //
 // Concurrency guarantees:
-//   - evaluator: Read concurrently from multiple permission checks. Evaluator is internally thread-safe (sync.Mutex).
-//   - auditLogger: Written from single-threaded loop goroutine. No concurrent writes.
-//   - history: Protected by mu. Modified in loop goroutine, read in snapshot operations.
+//   - evaluator: Thread-safe (sync.Mutex), called concurrently from multiple tool executions.
+//   - auditLogger: Written only after tool execution completes. Logger is internally thread-safe.
+//   - executor: Thread-safe per-isolate locks. Safe for concurrent Execute() calls.
+//   - notifier: Channel-based, safe for concurrent Send() from tool execution goroutines.
+//   - history: Protected by mu. Modified in loop goroutine only (after all tools complete), read in snapshot operations.
+//   - fileChangesByTool: Thread-safe map (mutex-protected) in bootstrap.go, tracks changes per tool call ID.
 type Session struct {
 	provider provider.Provider
 	tracker  *Tracker
@@ -131,13 +146,10 @@ type Session struct {
 	// Accessed only from the single-threaded loop goroutine — no mutex needed.
 	recentPrompts map[string]time.Time
 
-	// VFS snapshot context — set via SetSnapshotContextUpdater.
-	// pendingFileChanges is written by RecordFileChange (called from the
-	// snapshot closure inside executor.Execute) and read/reset by the tool
-	// dispatch section of processUserMessage. Both run on the single-threaded
-	// loop goroutine — no mutex needed (same invariant as recentPrompts).
-	snapshotUpdater    SnapshotContextUpdater // set before Start()
-	pendingFileChanges []FileChange           // accumulated during a single tool execution
+	// getFileChanges retrieves file changes for a specific tool call ID (thread-safe).
+	// With concurrent tool execution, changes are tracked per tool call ID in a
+	// map managed by bootstrap.go.
+	getFileChanges func(toolCallID string) []FileChange // set before Start()
 }
 
 // Notifier interface for UI updates. The Send method accepts any event type;
@@ -158,20 +170,11 @@ func (s *Session) SetSessionsDir(dir string) {
 	s.sessionsDir = dir
 }
 
-// SetSnapshotContextUpdater wires the VFS snapshotter for context tracking.
-// Must be called before Start().
-func (s *Session) SetSnapshotContextUpdater(u SnapshotContextUpdater) {
-	s.snapshotUpdater = u
-}
-
-// RecordFileChange accumulates a file change during tool execution.
-// Called from the bootstrap snapshot closure (same goroutine as tool execution).
-func (s *Session) RecordFileChange(path, operation string, wasNew bool) {
-	s.pendingFileChanges = append(s.pendingFileChanges, FileChange{
-		Path:      path,
-		Operation: operation,
-		WasNew:    wasNew,
-	})
+// SetFileChangesFunc wires the file change retrieval function.
+// Must be called before Start(). The function should return file changes
+// for a specific tool call ID and consume them (delete from map).
+func (s *Session) SetFileChangesFunc(f func(toolCallID string) []FileChange) {
+	s.getFileChanges = f
 }
 
 // HistorySnapshot returns a thread-safe copy of the current conversation history.
@@ -491,104 +494,91 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 			})
 			s.mu.Unlock()
 
-			// Dispatch each tool call and collect results
+			// Phase 1: Preflight all tool calls sequentially (permission checks,
+			// UI notifications, input serialization). This runs on the single-
+			// threaded loop goroutine so recentPrompts and permission prompts
+			// are safe — no concurrent map access, no competing UI prompts.
 			interactionID := uuid.New().String()
-			var toolResults []provider.ToolResult
-			for _, tc := range toolCalls {
-				// Notify UI of tool invocation
-				inputJSON, _ := json.Marshal(tc.Input)
-				s.notifier.Send(ToolUseEvent{
-					ToolCallID: tc.ID,
-					ToolName:   tc.Name,
-					Input:      string(inputJSON),
-				})
+			allExecutions := make([]toolExecution, len(toolCalls))
+			for i, tc := range toolCalls {
+				allExecutions[i] = s.preflightToolCall(ctx, tc)
+			}
 
-				// Check permission before execution
-				permDecision := s.checkPermission(ctx, tc.ID, tc.Name, tc.Input)
-
-				// Execute tool (or deny based on permission)
-				var tr provider.ToolResult
-				if !permDecision.allowed {
-					// Permission denied - return error as tool result
-					tr = provider.ToolResult{
-						ToolUseID: tc.ID,
-						Content:   "Permission denied: " + permDecision.reason,
-						IsError:   true,
-					}
-				} else if s.executor == nil {
-					tr = provider.ToolResult{
-						ToolUseID: tc.ID,
-						Content:   "no tool executor configured",
-						IsError:   true,
-					}
+			// Phase 2: Execute approved tools using batched concurrency.
+			// Only tools that passed permission checks are dispatched.
+			batches := s.batchToolsByPermissions(toolCalls)
+			offset := 0
+			for _, batch := range batches {
+				batchExecs := allExecutions[offset : offset+len(batch.toolCalls)]
+				if batch.isWrite {
+					s.executeBatchSequential(ctx, batchExecs, interactionID)
 				} else {
-					// Set VFS snapshot context for this tool call.
-					if s.snapshotUpdater != nil {
-						s.snapshotUpdater.SetSnapshotContext(interactionID, tc.ID)
-					}
-					s.pendingFileChanges = nil
+					s.executeBatchConcurrent(ctx, batchExecs, interactionID)
+				}
+				offset += len(batch.toolCalls)
+			}
 
-					result, execErr := s.executor.Execute(ctx, tc.Name, tc.Input)
-					tr = provider.ToolResult{
-						ToolUseID: tc.ID,
-						Content:   result,
-					}
-					if execErr != nil {
-						tr.Content = execErr.Error()
-						tr.IsError = true
-					}
-
-					// Emit file change event if any files were modified.
-					if len(s.pendingFileChanges) > 0 {
-						agentName := ""
-						if mp, ok := s.executor.(ToolManifestProvider); ok {
-							agentName, _, _ = mp.ToolPermissionRules(tc.Name)
-						}
-						s.notifier.Send(FileChangeEvent{
-							InteractionID: interactionID,
-							ToolCallID:    tc.ID,
-							ToolName:      tc.Name,
-							AgentName:     agentName,
-							Timestamp:     time.Now().UTC(),
-							Changes:       append([]FileChange{}, s.pendingFileChanges...),
-						})
-						s.pendingFileChanges = nil
+			// Phase 3: Ensure getFileChanges is called for every tool call
+			// (even denied ones) to prevent map leaks.
+			if s.getFileChanges != nil {
+				for _, exec := range allExecutions {
+					if exec.fileChanges == nil {
+						// Consume and discard any stale entries
+						s.getFileChanges(exec.toolCallID)
 					}
 				}
-				toolResults = append(toolResults, tr)
+			}
+
+			// Process results: emit events, build tool results, audit log.
+			var toolResults []provider.ToolResult
+			for _, exec := range allExecutions {
+				// Emit file change event if any files were modified.
+				if len(exec.fileChanges) > 0 {
+					s.notifier.Send(FileChangeEvent{
+						InteractionID: interactionID,
+						ToolCallID:    exec.toolCallID,
+						ToolName:      exec.toolCall.Name,
+						AgentName:     exec.agentName,
+						Timestamp:     time.Now().UTC(),
+						Changes:       exec.fileChanges,
+					})
+				}
 
 				// Notify UI of result
 				s.notifier.Send(ToolResultEvent{
-					ToolCallID: tc.ID,
-					ToolName:   tc.Name,
-					Result:     tr.Content,
-					IsError:    tr.IsError,
+					ToolCallID: exec.toolCallID,
+					ToolName:   exec.toolCall.Name,
+					Result:     exec.result.Content,
+					IsError:    exec.result.IsError,
 				})
 
 				// Send full execution data for agents page
 				s.notifier.Send(ToolExecutionEvent{
-					ToolCallID: tc.ID,
-					ToolName:   tc.Name,
-					Input:      string(inputJSON),
-					Output:     tr.Content,
-					IsError:    tr.IsError,
+					ToolCallID: exec.toolCallID,
+					ToolName:   exec.toolCall.Name,
+					Input:      exec.inputJSON,
+					Output:     exec.result.Content,
+					IsError:    exec.result.IsError,
 				})
 
 				// Log to audit trail
 				if s.auditLogger != nil {
 					if err := s.auditLogger.Log(policy.AuditEntry{
-						Agent:      "stub",  // Will be agent name once loader is implemented
-						Tool:       tc.Name,
-						Permission: "stub",  // Will be actual permission once policy integration is complete
-						Decision:   decisionFromError(tr.IsError),
+						Agent:      exec.agentName,
+						Tool:       exec.toolCall.Name,
+						Permission: "stub", // TODO: Include actual permission key
+						Decision:   decisionFromError(exec.result.IsError),
 						Source:     "manifest",
-						Arguments:  tc.Input,
-						ToolCallID: tc.ID,
-						Error:      errorString(tr),
+						Arguments:  exec.toolCall.Input,
+						ToolCallID: exec.toolCallID,
+						Error:      errorString(exec.result),
 					}); err != nil {
 						fmt.Fprintf(os.Stderr, "cosmos: audit log failed: %v\n", err)
 					}
 				}
+
+				// Append to tool results
+				toolResults = append(toolResults, exec.result)
 			}
 
 			// Append tool results as a user message (Bedrock convention)
@@ -948,10 +938,7 @@ func (s *Session) generateSummary(ctx context.Context) (string, error) {
 // Caller must hold s.mu lock.
 func (s *Session) buildCompactedHistory(summary string) []provider.Message {
 	// Preserve recent messages
-	preserveCount := compactionPreserveRecent
-	if len(s.history) < preserveCount {
-		preserveCount = len(s.history)
-	}
+	preserveCount := min(compactionPreserveRecent, len(s.history))
 	recentMessages := s.history[len(s.history)-preserveCount:]
 
 	// Build new history: [summary] + [recent messages]
@@ -1125,6 +1112,236 @@ func (s *Session) handlePermissionPrompt(
 	case <-ctx.Done():
 		return permissionDecision{allowed: false, reason: "operation cancelled"}
 	}
+}
+
+// toolExecution captures the complete result of executing a single tool.
+// Used to collect results from concurrent/sequential execution.
+type toolExecution struct {
+	toolCallID  string
+	toolCall    provider.ToolCall
+	result      provider.ToolResult
+	agentName   string
+	inputJSON   string
+	fileChanges []FileChange
+}
+
+// preflightToolCall runs the sequential, non-concurrent-safe parts of tool execution:
+// input serialization, UI notification, and permission checking.
+// Must be called from the single-threaded loop goroutine (accesses recentPrompts).
+// Returns a toolExecution with either a denied result or nil result (ready for execution).
+func (s *Session) preflightToolCall(ctx context.Context, tc provider.ToolCall) toolExecution {
+	exec := toolExecution{
+		toolCallID: tc.ID,
+		toolCall:   tc,
+	}
+
+	// Serialize input for logging
+	inputJSON, _ := json.Marshal(tc.Input)
+	exec.inputJSON = string(inputJSON)
+
+	// Notify UI of tool invocation (deterministic order from main goroutine)
+	s.notifier.Send(ToolUseEvent{
+		ToolCallID: tc.ID,
+		ToolName:   tc.Name,
+		Input:      exec.inputJSON,
+	})
+
+	// Check permission before execution (accesses recentPrompts — not thread-safe)
+	permDecision := s.checkPermission(ctx, tc.ID, tc.Name, tc.Input)
+	if !permDecision.allowed {
+		exec.result = provider.ToolResult{
+			ToolUseID: tc.ID,
+			Content:   "Permission denied: " + permDecision.reason,
+			IsError:   true,
+		}
+	} else if s.executor == nil {
+		exec.result = provider.ToolResult{
+			ToolUseID: tc.ID,
+			Content:   "no tool executor configured",
+			IsError:   true,
+		}
+	}
+
+	return exec
+}
+
+// executeTool runs the V8 tool execution and retrieves file changes.
+// This is the concurrent-safe part — all state it touches is either immutable,
+// per-tool-call, or protected by internal mutexes.
+func (s *Session) executeTool(ctx context.Context, exec *toolExecution, interactionID string) {
+	// Embed per-execution IDs in the context so the executor can read them
+	// under its per-isolate lock. This avoids the race condition of a two-phase
+	// Set/Execute approach where goroutine scheduling could mismatch IDs.
+	execCtx := ctx
+	if ec, ok := s.executor.(ExecutionContexter); ok {
+		execCtx = ec.WithExecContext(ctx, interactionID, exec.toolCall.ID)
+	}
+
+	result, execErr := s.executor.Execute(execCtx, exec.toolCall.Name, exec.toolCall.Input)
+	exec.result = provider.ToolResult{
+		ToolUseID: exec.toolCall.ID,
+		Content:   result,
+	}
+	if execErr != nil {
+		exec.result.Content = execErr.Error()
+		exec.result.IsError = true
+	}
+
+	// Retrieve file changes for this tool call.
+	if s.getFileChanges != nil {
+		exec.fileChanges = s.getFileChanges(exec.toolCall.ID)
+	}
+
+	// Get agent name for file change events.
+	if mp, ok := s.executor.(ToolManifestProvider); ok {
+		exec.agentName, _, _ = mp.ToolPermissionRules(exec.toolCall.Name)
+	}
+}
+
+// maxConcurrentTools limits the number of goroutines spawned for concurrent
+// tool execution, preventing resource exhaustion if the LLM returns many
+// tool calls in a single response.
+const maxConcurrentTools = 8
+
+// executeBatchConcurrent runs all pre-flighted tools in a batch concurrently.
+// Permission checks have already been done; only tools with result.Content == ""
+// (i.e., not denied) are dispatched to the executor. Denied tools already have
+// their result set from preflight.
+// Results are collected in order (each goroutine writes to its own index).
+//
+// A buffered channel of size maxConcurrentTools acts as a counting semaphore,
+// acquired on the main goroutine to bound goroutine fan-out.
+func (s *Session) executeBatchConcurrent(ctx context.Context, execs []toolExecution, interactionID string) {
+	sem := make(chan struct{}, maxConcurrentTools)
+	var wg sync.WaitGroup
+
+	for i := range execs {
+		if execs[i].result.ToolUseID != "" {
+			continue // Already resolved (denied/no executor)
+		}
+		wg.Add(1)
+		// Acquire semaphore slot; also respect context cancellation so we
+		// don't block forever if the parent context is cancelled.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Done()
+			execs[i].result = provider.ToolResult{
+				ToolUseID: execs[i].toolCall.ID,
+				Content:   fmt.Sprintf("tool %s cancelled: %v", execs[i].toolCall.Name, ctx.Err()),
+				IsError:   true,
+			}
+			continue
+		}
+		go func(idx int) {
+			defer func() { <-sem }() // Release semaphore slot
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in tool %s: %v\n%s", execs[idx].toolCall.Name, r, debug.Stack())
+					execs[idx].result = provider.ToolResult{
+						ToolUseID: execs[idx].toolCall.ID,
+						Content:   fmt.Sprintf("internal error: tool panicked: %v", r),
+						IsError:   true,
+					}
+				}
+			}()
+			s.executeTool(ctx, &execs[idx], interactionID)
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+// executeBatchSequential runs all pre-flighted tools in a batch one at a time.
+// Used for write tools to maintain ordering and avoid conflicts.
+func (s *Session) executeBatchSequential(ctx context.Context, execs []toolExecution, interactionID string) {
+	for i := range execs {
+		if execs[i].result.ToolUseID != "" {
+			continue // Already resolved (denied/no executor)
+		}
+		s.executeTool(ctx, &execs[i], interactionID)
+	}
+}
+
+// isWriteTool checks if a tool has write permissions based on its manifest rules.
+// A tool is considered a "write" tool if it declares any of:
+//   - fs:write (non-deny mode)
+//   - docker:* (non-deny mode)
+// All other tools (including pure functions with no permissions) are read-only.
+func (s *Session) isWriteTool(toolName string) bool {
+	mp, ok := s.executor.(ToolManifestProvider)
+	if !ok {
+		return false // No manifest provider = stub mode = treat as read-only
+	}
+
+	_, rules, found := mp.ToolPermissionRules(toolName)
+	if !found || len(rules) == 0 {
+		return false // No rules = pure function = read-only
+	}
+
+	for _, rule := range rules {
+		// Check for write permissions
+		if rule.Mode == manifest.PermissionDeny {
+			continue // Explicit deny doesn't count as write
+		}
+
+		// Check permission key patterns for destructive operations
+		key := rule.Key.Raw
+		if key == "fs:write" ||
+			strings.HasPrefix(key, "fs:write:") ||
+			key == "fs:unlink" ||
+			strings.HasPrefix(key, "fs:unlink:") ||
+			key == "storage:write" ||
+			strings.HasPrefix(key, "storage:write:") ||
+			key == "docker" ||
+			strings.HasPrefix(key, "docker:") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// batchToolsByPermissions groups consecutive tool calls into batches for concurrent execution.
+// Read-only tools are grouped together and can run concurrently.
+// Write tools are placed in singleton batches and run sequentially.
+//
+// Example: [R, R, W, R, R] → [batch{R,R}, batch{W}, batch{R,R}]
+func (s *Session) batchToolsByPermissions(toolCalls []provider.ToolCall) []toolBatch {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+
+	var batches []toolBatch
+	currentBatch := toolBatch{
+		isWrite:   s.isWriteTool(toolCalls[0].Name),
+		toolCalls: []provider.ToolCall{toolCalls[0]},
+		startIdx:  0,
+	}
+
+	for i := 1; i < len(toolCalls); i++ {
+		tc := toolCalls[i]
+		isWrite := s.isWriteTool(tc.Name)
+
+		// Consecutive tools of the same type share a batch.
+		// Read-only batches run concurrently; write batches run sequentially
+		// (executeBatchSequential processes tools one at a time within a batch).
+		if isWrite == currentBatch.isWrite {
+			currentBatch.toolCalls = append(currentBatch.toolCalls, tc)
+		} else {
+			batches = append(batches, currentBatch)
+			currentBatch = toolBatch{
+				isWrite:   isWrite,
+				toolCalls: []provider.ToolCall{tc},
+				startIdx:  i,
+			}
+		}
+	}
+
+	// Don't forget the last batch
+	batches = append(batches, currentBatch)
+	return batches
 }
 
 // estimateTokenCount estimates token count using character heuristic.

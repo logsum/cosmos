@@ -24,10 +24,12 @@ func fsTestExecutor(t *testing.T, funcName, allowDir string) (*V8Executor, *Tool
 	}
 
 	permissions := map[string]manifest.PermissionMode{
-		"fs:read:" + allowDir + "/**":  manifest.PermissionAllow,
-		"fs:write:" + allowDir + "/**": manifest.PermissionAllow,
-		"fs:write":                     manifest.PermissionDeny,
-		"fs:read":                      manifest.PermissionDeny,
+		"fs:read:" + allowDir + "/**":   manifest.PermissionAllow,
+		"fs:write:" + allowDir + "/**":  manifest.PermissionAllow,
+		"fs:unlink:" + allowDir + "/**": manifest.PermissionAllow,
+		"fs:write":                      manifest.PermissionDeny,
+		"fs:unlink":                     manifest.PermissionDeny,
+		"fs:read":                       manifest.PermissionDeny,
 	}
 
 	toolCtx := testToolContext(t, "fs-agent", permissions)

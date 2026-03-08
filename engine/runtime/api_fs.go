@@ -88,7 +88,7 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 
 		// Snapshot before write for VFS rollback.
 		if ctx.Snapshotter != nil {
-			if err := ctx.Snapshotter(path, "write", ctx.AgentName); err != nil {
+			if err := ctx.Snapshotter(path, "write", ctx.AgentName, ctx.InteractionID, ctx.ToolCallID); err != nil {
 				fmt.Fprintf(os.Stderr, "cosmos: snapshot before write: %v\n", err)
 			}
 		}
@@ -214,8 +214,8 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 			return throwJSError(v8iso, v8ctx, fmt.Sprintf("fs.unlink: resolve path: %s", err))
 		}
 
-		// Destructive — uses write permission.
-		if err := checkPermission(ctx, "fs:write:"+path); err != nil {
+		// Destructive — uses its own permission key.
+		if err := checkPermission(ctx, "fs:unlink:"+path); err != nil {
 			return throwJSError(v8iso, v8ctx, err.Error())
 		}
 
@@ -230,7 +230,7 @@ func injectFsAPI(iso *v8.Isolate, global *v8.ObjectTemplate, ctx *ToolContext) e
 
 		// Snapshot before delete for VFS rollback.
 		if ctx.Snapshotter != nil {
-			if err := ctx.Snapshotter(path, "delete", ctx.AgentName); err != nil {
+			if err := ctx.Snapshotter(path, "delete", ctx.AgentName, ctx.InteractionID, ctx.ToolCallID); err != nil {
 				fmt.Fprintf(os.Stderr, "cosmos: snapshot before unlink: %v\n", err)
 			}
 		}
