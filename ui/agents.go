@@ -212,14 +212,15 @@ func (m *AgentsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollOffset = 0
 
 		case "up":
-			if m.mode == viewModeHistory {
+			switch m.mode {
+			case viewModeHistory:
 				if m.detailsFocused {
 					m.detailsFocused = false
 				} else if m.cursor > 0 {
 					m.cursor--
 					m.adjustScroll()
 				}
-			} else if m.mode == viewModeTools {
+			case viewModeTools:
 				if m.cursor > 0 {
 					m.cursor--
 					m.adjustScroll()
@@ -227,7 +228,8 @@ func (m *AgentsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down":
-			if m.mode == viewModeHistory {
+			switch m.mode {
+			case viewModeHistory:
 				if len(m.executions) > 0 && m.executions[m.cursor].Expanded && !m.detailsFocused {
 					m.detailsFocused = true
 				} else {
@@ -237,7 +239,7 @@ func (m *AgentsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.adjustScroll()
 					}
 				}
-			} else if m.mode == viewModeTools {
+			case viewModeTools:
 				if m.cursor < len(m.availableTools)-1 {
 					m.cursor++
 					m.adjustScroll()

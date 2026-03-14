@@ -2,10 +2,13 @@ package app
 
 import (
 	"cosmos/core"
+	"cosmos/engine/policy"
+	"cosmos/engine/vfs"
 	"cosmos/ui"
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -13,7 +16,8 @@ import (
 // coreNotifierAdapter translates core-level events into UI-specific Bubble Tea messages,
 // bridging the gap between the framework-agnostic core and the TUI.
 type coreNotifierAdapter struct {
-	ui interface{ Send(tea.Msg) }
+	ui        interface{ Send(tea.Msg) }
+	cosmosDir string // project-local .cosmos directory for audit/snapshot replay
 }
 
 func (a *coreNotifierAdapter) Send(msg any) {
@@ -108,19 +112,18 @@ func (a *coreNotifierAdapter) Send(msg any) {
 		a.ui.Send(ui.ChatSystemMsg{Text: text})
 	case core.SessionRestoredEvent:
 		a.ui.Send(ui.ChatSystemMsg{Text: fmt.Sprintf("Restored: %s (%d messages)", e.Description, e.MessageCount)})
+		if e.SessionID != "" && a.cosmosDir != "" {
+			go a.replayChangelog(e.SessionID)
+		}
 	case core.FileChangeEvent:
 		files := make([]ui.ChangelogFile, len(e.Changes))
 		for i, c := range e.Changes {
 			files[i] = ui.ChangelogFile{Path: c.Path, Operation: c.Operation, WasNew: c.WasNew}
 		}
-		desc := fmt.Sprintf("%s modified %d file(s)", e.ToolName, len(e.Changes))
-		if e.AgentName != "" {
-			desc = fmt.Sprintf("%s (%s) modified %d file(s)", e.ToolName, e.AgentName, len(e.Changes))
-		}
 		a.ui.Send(ui.ChangelogEntryMsg{
 			InteractionID: e.InteractionID,
 			Timestamp:     e.Timestamp.Local().Format("2006-01-02 15:04:05"),
-			Description:   desc,
+			Description:   formatChangeDesc(e.ToolName, e.AgentName, len(e.Changes)),
 			Files:         files,
 		})
 	default:
@@ -128,6 +131,100 @@ func (a *coreNotifierAdapter) Send(msg any) {
 		// This should never happen in production if all core events are properly handled.
 		fmt.Fprintf(os.Stderr, "cosmos: warning: unhandled core event type: %T\n", msg)
 	}
+}
+
+// replayChangelog reconstructs changelog entries for a restored session by
+// correlating the VFS snapshot manifest with the audit log. Each unique
+// InteractionID in the manifest becomes a ChangelogEntryMsg sent to the UI.
+// Entries are emitted oldest-first so the newest appears at the top after
+// the changelog page prepends each one.
+func (a *coreNotifierAdapter) replayChangelog(sessionID string) {
+	records, err := vfs.ReadSnapshotManifest(a.cosmosDir, sessionID)
+	if err != nil {
+		log.Printf("changelog replay: read snapshot manifest: %v", err)
+		return
+	}
+	if len(records) == 0 {
+		return
+	}
+
+	// Read audit log to enrich descriptions with tool function names.
+	auditEntries, _ := policy.ReadAuditLog(sessionID, a.cosmosDir)
+
+	// Index audit entries by ToolCallID (first matching entry wins).
+	type auditInfo struct{ tool, agent string }
+	byToolCall := make(map[string]auditInfo, len(auditEntries))
+	for _, e := range auditEntries {
+		if _, exists := byToolCall[e.ToolCallID]; !exists {
+			byToolCall[e.ToolCallID] = auditInfo{tool: e.Tool, agent: e.Agent}
+		}
+	}
+
+	// Group snapshot records by InteractionID, preserving first-seen order.
+	type group struct {
+		timestamp time.Time
+		toolName  string
+		agentName string
+		changes   []ui.ChangelogFile
+	}
+	var orderedIDs []string
+	groups := make(map[string]*group)
+
+	for _, rec := range records {
+		if rec.InteractionID == "" {
+			continue
+		}
+		g, exists := groups[rec.InteractionID]
+		if !exists {
+			g = &group{
+				timestamp: rec.Timestamp,
+				agentName: rec.AgentName,
+			}
+			if info, ok := byToolCall[rec.ToolCallID]; ok {
+				g.toolName = info.tool
+				if g.agentName == "" {
+					g.agentName = info.agent
+				}
+			}
+			orderedIDs = append(orderedIDs, rec.InteractionID)
+			groups[rec.InteractionID] = g
+		} else if rec.Timestamp.Before(g.timestamp) {
+			g.timestamp = rec.Timestamp
+		}
+		g.changes = append(g.changes, ui.ChangelogFile{
+			Path:      rec.Path,
+			Operation: rec.Operation,
+			WasNew:    rec.WasNewFile,
+		})
+	}
+
+	// Emit oldest-first so the changelog page (which prepends) ends up newest-at-top.
+	for _, id := range orderedIDs {
+		g := groups[id]
+		a.ui.Send(ui.ChangelogEntryMsg{
+			InteractionID: id,
+			Timestamp:     g.timestamp.Local().Format("2006-01-02 15:04:05"),
+			Description:   formatChangeDesc(g.toolName, g.agentName, len(g.changes)),
+			Files:         g.changes,
+		})
+	}
+}
+
+// formatChangeDesc builds a human-readable description for a changelog entry.
+// Rules: if both names are known, format as "tool (agent) modified N file(s)";
+// if only one is known, use it; if neither is known, fall back to "unknown".
+func formatChangeDesc(toolName, agentName string, n int) string {
+	if toolName != "" && agentName != "" {
+		return fmt.Sprintf("%s (%s) modified %d file(s)", toolName, agentName, n)
+	}
+	actor := toolName
+	if actor == "" {
+		actor = agentName
+	}
+	if actor == "" {
+		actor = "unknown"
+	}
+	return fmt.Sprintf("%s modified %d file(s)", actor, n)
 }
 
 // formatContextPercentage formats context usage for status bar display.

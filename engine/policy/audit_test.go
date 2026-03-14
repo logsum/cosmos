@@ -17,7 +17,7 @@ func TestAuditLogger_NewAndLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditLogger failed: %v", err)
 	}
-	defer logger.Close()
+	t.Cleanup(func() { _ = logger.Close() })
 
 	// Log an entry
 	entry := AuditEntry{
@@ -74,7 +74,7 @@ func TestAuditLogger_Redaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditLogger failed: %v", err)
 	}
-	defer logger.Close()
+	t.Cleanup(func() { _ = logger.Close() })
 
 	// Log entry with sensitive data
 	entry := AuditEntry{
@@ -98,7 +98,7 @@ func TestAuditLogger_Redaction(t *testing.T) {
 	if err := logger.Log(entry); err != nil {
 		t.Fatalf("Log failed: %v", err)
 	}
-	logger.Close()
+	_ = logger.Close()
 
 	// Read back and verify redaction
 	entries, err := ReadAuditLog(sessionID, tmpDir)
@@ -135,7 +135,7 @@ func TestAuditLogger_ConcurrentWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditLogger failed: %v", err)
 	}
-	defer logger.Close()
+	t.Cleanup(func() { _ = logger.Close() })
 
 	// Write concurrently from multiple goroutines
 	const numWorkers = 10
@@ -164,7 +164,7 @@ func TestAuditLogger_ConcurrentWrites(t *testing.T) {
 	}
 
 	wg.Wait()
-	logger.Close()
+	_ = logger.Close()
 
 	// Verify all entries were written
 	entries, err := ReadAuditLog(sessionID, tmpDir)

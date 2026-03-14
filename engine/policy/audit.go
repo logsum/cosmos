@@ -12,16 +12,17 @@ import (
 
 // AuditEntry is a single audit log record (JSON-lines format).
 type AuditEntry struct {
-	Timestamp   string                 `json:"timestamp"`    // RFC3339
-	SessionID   string                 `json:"session_id"`
-	Agent       string                 `json:"agent"`
-	Tool        string                 `json:"tool"`
-	Permission  string                 `json:"permission"`
-	Decision    string                 `json:"decision"`      // "allowed", "denied", "user_approved", "user_denied"
-	Source      string                 `json:"source"`        // "manifest", "policy_override", "persisted_grant", "default_deny"
-	Arguments   map[string]any `json:"arguments"`     // Redacted for sensitive data
-	ToolCallID  string                 `json:"tool_call_id"`
-	Error       string                 `json:"error,omitempty"`
+	Timestamp     string         `json:"timestamp"`      // RFC3339
+	SessionID     string         `json:"session_id"`
+	InteractionID string         `json:"interaction_id"` // LLM turn that triggered this tool call
+	Agent         string         `json:"agent"`
+	Tool          string         `json:"tool"`
+	Permission    string         `json:"permission"`
+	Decision      string         `json:"decision"`       // "allowed", "denied", "user_approved", "user_denied"
+	Source        string         `json:"source"`         // "manifest", "policy_override", "persisted_grant", "default_deny"
+	Arguments     map[string]any `json:"arguments"`      // Redacted for sensitive data
+	ToolCallID    string         `json:"tool_call_id"`
+	Error         string         `json:"error,omitempty"`
 }
 
 // AuditLogger appends audit entries to a session-specific JSON-lines file.

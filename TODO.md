@@ -213,7 +213,7 @@ File safety net — every write is reversible.
 - [x] Replace mock data in `changelog.go` with real VFS snapshot entries
 - [x] Group entries by interaction (multi-file edits in one exchange)
 - [x] Implement "Restore" action: revert all files in a group to snapshot state
-- [ ] Timestamp and description from audit log correlation
+- [x] Timestamp and description from audit log correlation
 
 ---
 

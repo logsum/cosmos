@@ -1,9 +1,11 @@
 package vfs
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // mustMkdir creates a directory or fails the test.
@@ -425,5 +427,97 @@ func TestRestorePreservesFileMode(t *testing.T) {
 	data, _ := os.ReadFile(filePath)
 	if string(data) != "#!/bin/sh\necho hi" {
 		t.Errorf("expected original content, got %q", string(data))
+	}
+}
+
+// --- ReadSnapshotManifest tests ---
+
+func TestReadSnapshotManifest_NotExist(t *testing.T) {
+	dir := t.TempDir()
+	records, err := ReadSnapshotManifest(filepath.Join(dir, ".cosmos"), "no-such-session")
+	if err != nil {
+		t.Fatalf("expected nil error for missing manifest, got %v", err)
+	}
+	if records != nil {
+		t.Errorf("expected nil records for missing manifest, got %v", records)
+	}
+}
+
+func TestReadSnapshotManifest_Valid(t *testing.T) {
+	dir := t.TempDir()
+	cosmosDir := filepath.Join(dir, ".cosmos")
+	workDir := filepath.Join(dir, "work")
+	mustMkdir(t, workDir)
+
+	filePath := filepath.Join(workDir, "test.txt")
+	mustWrite(t, filePath, "hello")
+
+	snap, err := NewSnapshotter(cosmosDir, "sess-rsm-1")
+	if err != nil {
+		t.Fatalf("NewSnapshotter: %v", err)
+	}
+	if _, err := snap.Snapshot(filePath, "write", "myagent", "iA", "tc1"); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	records, err := ReadSnapshotManifest(cosmosDir, "sess-rsm-1")
+	if err != nil {
+		t.Fatalf("ReadSnapshotManifest: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	rec := records[0]
+	if rec.Path != filePath {
+		t.Errorf("path: expected %q, got %q", filePath, rec.Path)
+	}
+	if rec.AgentName != "myagent" {
+		t.Errorf("agent: expected %q, got %q", "myagent", rec.AgentName)
+	}
+	if rec.InteractionID != "iA" {
+		t.Errorf("interaction: expected %q, got %q", "iA", rec.InteractionID)
+	}
+	if rec.ToolCallID != "tc1" {
+		t.Errorf("tool call: expected %q, got %q", "tc1", rec.ToolCallID)
+	}
+}
+
+func TestReadSnapshotManifest_MalformedLinesSkipped(t *testing.T) {
+	dir := t.TempDir()
+	cosmosDir := filepath.Join(dir, ".cosmos")
+
+	manifestDir := filepath.Join(cosmosDir, "snapshots", "sess-rsm-2")
+	mustMkdir(t, manifestDir)
+	good := SnapshotRecord{
+		Path:          "/tmp/x.txt",
+		Operation:     "write",
+		AgentName:     "ag",
+		InteractionID: "i1",
+		ToolCallID:    "tc1",
+		Timestamp:     time.Now().UTC(),
+	}
+	goodLine, _ := json.Marshal(good)
+	manifestPath := filepath.Join(manifestDir, "manifest.jsonl")
+	content := string(goodLine) + "\n{not valid json}\n"
+	if err := os.WriteFile(manifestPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	records, err := ReadSnapshotManifest(cosmosDir, "sess-rsm-2")
+	if err != nil {
+		t.Fatalf("ReadSnapshotManifest: %v", err)
+	}
+	if len(records) != 1 {
+		t.Errorf("expected 1 valid record (malformed skipped), got %d", len(records))
+	}
+}
+
+func TestReadSnapshotManifest_PathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	cosmosDir := filepath.Join(dir, ".cosmos")
+
+	_, err := ReadSnapshotManifest(cosmosDir, "../../etc")
+	if err == nil {
+		t.Fatal("expected error for path-traversal session ID, got nil")
 	}
 }

@@ -1278,7 +1278,7 @@ func TestSession_AuditLogging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditLogger failed: %v", err)
 	}
-	defer auditLogger.Close()
+	t.Cleanup(func() { _ = auditLogger.Close() })
 
 	session := NewSession(sessionID, prov, tracker, notifier, "test-model", "system", 1024, executor, nil, auditLogger, nil)
 
@@ -1350,7 +1350,7 @@ func TestSession_AuditLoggingError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditLogger failed: %v", err)
 	}
-	defer auditLogger.Close()
+	t.Cleanup(func() { _ = auditLogger.Close() })
 
 	session := NewSession(sessionID, prov, tracker, notifier, "test-model", "system", 1024, executor, nil, auditLogger, nil)
 

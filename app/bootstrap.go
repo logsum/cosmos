@@ -216,11 +216,11 @@ func setupSession(
 	tracker *core.Tracker,
 	notifier *ui.Notifier,
 ) (*setupSessionResult, error) {
-	adapter := &coreNotifierAdapter{ui: notifier}
+	cosmosDir := ".cosmos" // Project-local directory
+	adapter := &coreNotifierAdapter{ui: notifier, cosmosDir: cosmosDir}
 
 	// Create audit logger with session ID
 	sessionID := uuid.New().String()
-	cosmosDir := ".cosmos" // Project-local directory
 	auditLogger, err := policy.NewAuditLogger(sessionID, cosmosDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cosmos: warning: audit logger init failed: %v\n", err)

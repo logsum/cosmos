@@ -84,7 +84,7 @@ func TestFsRead_PermissionDenied(t *testing.T) {
 	if err := os.WriteFile(outsideFile, []byte("secret"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	defer os.Remove(outsideFile)
+	defer func() { _ = os.Remove(outsideFile) }()
 
 	e, _ := fsTestExecutor(t, "readFile", tmpDir)
 
@@ -130,7 +130,7 @@ func TestFsWrite(t *testing.T) {
 func TestFsWrite_PermissionDenied(t *testing.T) {
 	tmpDir := t.TempDir()
 	outsideFile := filepath.Join(os.TempDir(), "outside-write.txt")
-	defer os.Remove(outsideFile)
+	defer func() { _ = os.Remove(outsideFile) }()
 
 	e, _ := fsTestExecutor(t, "writeFile", tmpDir)
 

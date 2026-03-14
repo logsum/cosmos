@@ -2,8 +2,10 @@ package app
 
 import (
 	"cosmos/core"
+	"cosmos/engine/vfs"
 	"cosmos/ui"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 
@@ -206,5 +208,144 @@ func TestAdapterSessionRestoredEvent(t *testing.T) {
 	expected := "Restored: Hello world (12 messages)"
 	if sys.Text != expected {
 		t.Errorf("expected %q, got %q", expected, sys.Text)
+	}
+}
+
+// --- replayChangelog and formatChangeDesc tests ---
+
+func TestFormatChangeDesc_BothNames(t *testing.T) {
+	got := formatChangeDesc("write", "code-editor", 3)
+	want := "write (code-editor) modified 3 file(s)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatChangeDesc_OnlyTool(t *testing.T) {
+	got := formatChangeDesc("write", "", 1)
+	want := "write modified 1 file(s)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatChangeDesc_OnlyAgent(t *testing.T) {
+	got := formatChangeDesc("", "code-editor", 2)
+	want := "code-editor modified 2 file(s)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatChangeDesc_BothEmpty(t *testing.T) {
+	got := formatChangeDesc("", "", 5)
+	want := "unknown modified 5 file(s)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestReplayChangelog_EmptyManifest(t *testing.T) {
+	dir := t.TempDir()
+	col := &collectingUINotifier{}
+	adapter := &coreNotifierAdapter{ui: col, cosmosDir: dir}
+
+	adapter.replayChangelog("no-such-session")
+
+	if msgs := col.all(); len(msgs) != 0 {
+		t.Errorf("expected 0 messages for missing manifest, got %d", len(msgs))
+	}
+}
+
+func TestReplayChangelog_Grouping(t *testing.T) {
+	cosmosDir := t.TempDir()
+	workDir := t.TempDir()
+
+	file1 := workDir + "/a.txt"
+	file2 := workDir + "/b.txt"
+	if err := os.WriteFile(file1, []byte("aaa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file2, []byte("bbb"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := vfs.NewSnapshotter(cosmosDir, "sess-replay-1")
+	if err != nil {
+		t.Fatalf("NewSnapshotter: %v", err)
+	}
+	// Interaction i1 → file1
+	if _, err := snap.Snapshot(file1, "write", "code-editor", "i1", "tc1"); err != nil {
+		t.Fatalf("Snapshot file1: %v", err)
+	}
+	// Interaction i2 → file2
+	if _, err := snap.Snapshot(file2, "write", "code-editor", "i2", "tc2"); err != nil {
+		t.Fatalf("Snapshot file2: %v", err)
+	}
+
+	col := &collectingUINotifier{}
+	adapter := &coreNotifierAdapter{ui: col, cosmosDir: cosmosDir}
+	adapter.replayChangelog("sess-replay-1")
+
+	msgs := col.all()
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 ChangelogEntryMsg (one per interaction), got %d", len(msgs))
+	}
+
+	e0, ok := msgs[0].(ui.ChangelogEntryMsg)
+	if !ok {
+		t.Fatalf("msgs[0]: expected ChangelogEntryMsg, got %T", msgs[0])
+	}
+	e1, ok := msgs[1].(ui.ChangelogEntryMsg)
+	if !ok {
+		t.Fatalf("msgs[1]: expected ChangelogEntryMsg, got %T", msgs[1])
+	}
+	// Emitted oldest-first: i1 then i2.
+	if e0.InteractionID != "i1" {
+		t.Errorf("expected first entry interactionID=i1, got %q", e0.InteractionID)
+	}
+	if e1.InteractionID != "i2" {
+		t.Errorf("expected second entry interactionID=i2, got %q", e1.InteractionID)
+	}
+	if len(e0.Files) != 1 {
+		t.Errorf("expected 1 file in entry0, got %d", len(e0.Files))
+	}
+	if e0.Timestamp == "" {
+		t.Error("expected non-empty timestamp")
+	}
+}
+
+func TestReplayChangelog_MissingAuditLogStillProducesEntries(t *testing.T) {
+	cosmosDir := t.TempDir()
+	workDir := t.TempDir()
+	filePath := workDir + "/x.txt"
+	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := vfs.NewSnapshotter(cosmosDir, "sess-replay-2")
+	if err != nil {
+		t.Fatalf("NewSnapshotter: %v", err)
+	}
+	if _, err := snap.Snapshot(filePath, "write", "my-agent", "i1", "tc1"); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	col := &collectingUINotifier{}
+	adapter := &coreNotifierAdapter{ui: col, cosmosDir: cosmosDir}
+	// No audit log file written — should still produce entry from manifest.
+	adapter.replayChangelog("sess-replay-2")
+
+	msgs := col.all()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message even without audit log, got %d", len(msgs))
+	}
+	entry := msgs[0].(ui.ChangelogEntryMsg)
+	// Agent name comes from VFS manifest ("my-agent").
+	if entry.Description == "" {
+		t.Error("expected non-empty description")
+	}
+	if len(entry.Files) != 1 {
+		t.Errorf("expected 1 file, got %d", len(entry.Files))
 	}
 }

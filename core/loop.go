@@ -395,7 +395,7 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 				break
 			}
 			if err != nil {
-				iter.Close()
+				_ = iter.Close()
 				return fmt.Errorf("stream error: %w", err)
 			}
 
@@ -436,7 +436,7 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 				stopReason = chunk.StopReason
 			}
 		}
-		iter.Close()
+		_ = iter.Close()
 
 		// Record token usage
 		if usage != nil {
@@ -564,14 +564,15 @@ func (s *Session) processUserMessage(ctx context.Context, text string) error {
 				// Log to audit trail
 				if s.auditLogger != nil {
 					if err := s.auditLogger.Log(policy.AuditEntry{
-						Agent:      exec.agentName,
-						Tool:       exec.toolCall.Name,
-						Permission: "stub", // TODO: Include actual permission key
-						Decision:   decisionFromError(exec.result.IsError),
-						Source:     "manifest",
-						Arguments:  exec.toolCall.Input,
-						ToolCallID: exec.toolCallID,
-						Error:      errorString(exec.result),
+						InteractionID: interactionID,
+						Agent:         exec.agentName,
+						Tool:          exec.toolCall.Name,
+						Permission:    "stub", // TODO: Include actual permission key
+						Decision:      decisionFromError(exec.result.IsError),
+						Source:        "manifest",
+						Arguments:     exec.toolCall.Input,
+						ToolCallID:    exec.toolCallID,
+						Error:         errorString(exec.result),
 					}); err != nil {
 						fmt.Fprintf(os.Stderr, "cosmos: audit log failed: %v\n", err)
 					}
@@ -785,6 +786,7 @@ func (s *Session) handleRestoreCommand(_ context.Context, args string) error {
 	s.mu.Unlock()
 
 	s.notifier.Send(SessionRestoredEvent{
+		SessionID:    saved.SessionID,
 		Description:  saved.Description,
 		MessageCount: len(saved.History),
 	})
@@ -884,15 +886,15 @@ func (s *Session) generateSummary(ctx context.Context) (string, error) {
 		if msg.Role == provider.RoleAssistant {
 			role = "Assistant"
 		}
-		conversationText.WriteString(fmt.Sprintf("\n## %s\n%s\n", role, msg.Content))
+		fmt.Fprintf(&conversationText, "\n## %s\n%s\n", role, msg.Content)
 
 		// Include tool calls/results if present
 		for _, tc := range msg.ToolCalls {
 			inputJSON, _ := json.Marshal(tc.Input)
-			conversationText.WriteString(fmt.Sprintf("\n[Tool: %s]\nInput: %s\n", tc.Name, inputJSON))
+			fmt.Fprintf(&conversationText, "\n[Tool: %s]\nInput: %s\n", tc.Name, inputJSON)
 		}
 		for _, tr := range msg.ToolResults {
-			conversationText.WriteString(fmt.Sprintf("\n[Tool Result]\n%s\n", tr.Content))
+			fmt.Fprintf(&conversationText, "\n[Tool Result]\n%s\n", tr.Content)
 		}
 	}
 
@@ -915,7 +917,7 @@ func (s *Session) generateSummary(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to request summary: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	var summary strings.Builder
 	for {

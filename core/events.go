@@ -121,6 +121,7 @@ type ContextInfoEvent struct {
 
 // SessionRestoredEvent signals a session was successfully restored from disk via /restore.
 type SessionRestoredEvent struct {
+	SessionID    string // ID of the restored session (for changelog replay)
 	Description  string
 	MessageCount int
 }

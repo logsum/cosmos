@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -60,7 +61,7 @@ func NewSnapshotter(cosmosDir, sessionID string) (*Snapshotter, error) {
 	// Load existing manifest if resuming a session.
 	manifestPath := filepath.Join(sessionDir, "manifest.jsonl")
 	if f, err := os.Open(manifestPath); err == nil {
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			var rec SnapshotRecord
@@ -243,6 +244,46 @@ func (s *Snapshotter) ReadSnapshotContent(hash string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.readBlob(hash)
+}
+
+// ReadSnapshotManifest reads all snapshot records from a session's persisted manifest.
+// Returns nil, nil if no manifest exists (new or unmodified session).
+func ReadSnapshotManifest(cosmosDir, sessionID string) ([]SnapshotRecord, error) {
+	// Guard against path traversal: verify the resolved manifest path stays
+	// inside the expected snapshots directory before opening the file.
+	snapshotsDir := filepath.Join(cosmosDir, "snapshots")
+	manifestPath := filepath.Join(snapshotsDir, sessionID, "manifest.jsonl")
+	absManifest, err := filepath.Abs(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve manifest path: %w", err)
+	}
+	absSnapshots, err := filepath.Abs(snapshotsDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve snapshots dir: %w", err)
+	}
+	if !strings.HasPrefix(absManifest, absSnapshots+string(filepath.Separator)) {
+		return nil, fmt.Errorf("invalid session ID: path escapes snapshots directory")
+	}
+
+	f, err := os.Open(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open snapshot manifest: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var records []SnapshotRecord
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var rec SnapshotRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue // skip malformed lines
+		}
+		records = append(records, rec)
+	}
+	return records, scanner.Err()
 }
 
 // readBlob reads a content-addressed blob. Caller must hold s.mu.

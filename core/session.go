@@ -113,7 +113,7 @@ func SaveSession(s *Session, tracker *Tracker, sessionsDir, workDir string) erro
 		return fmt.Errorf("writing session file: %w", err)
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("renaming session file: %w", err)
 	}
 
